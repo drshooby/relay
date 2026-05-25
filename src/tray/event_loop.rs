@@ -132,7 +132,11 @@ impl RelayApp {
             .is_some_and(|item| event.id == item.id())
     }
 
-    fn dispatch_menu_event(&mut self, event_loop: &ActiveEventLoop, event: &tray_icon::menu::MenuEvent) {
+    fn dispatch_menu_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        event: &tray_icon::menu::MenuEvent,
+    ) {
         self.handle_menu_event(event);
         if self.is_quit_menu_event(event) {
             event_loop.exit();

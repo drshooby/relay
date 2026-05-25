@@ -8,12 +8,36 @@ use crate::discord::activity::{build_activity, TrackInfo};
 use crate::discord::reconnect::{initial_backoff_ms, next_backoff_ms};
 use crate::media::event::HelperCommand;
 
+/// Last activity re-published on reconnect and heartbeat.
+#[derive(Debug, Clone)]
+struct CachedActivity {
+    track: TrackInfo,
+    artwork_url: Option<String>,
+    track_url: Option<String>,
+    started_at: i64,
+    duration_secs: Option<u64>,
+}
+
+impl CachedActivity {
+    fn build(&self) -> discord_rich_presence::activity::Activity<'static> {
+        build_activity(
+            &self.track,
+            self.artwork_url.as_deref(),
+            self.track_url.as_deref(),
+            self.started_at,
+            self.duration_secs,
+        )
+    }
+}
+
 #[derive(Debug)]
 pub enum DiscordCommand {
     SetActivity {
         track: TrackInfo,
         artwork_url: Option<String>,
+        track_url: Option<String>,
         started_at: i64,
+        duration_secs: Option<u64>,
     },
     ClearActivity,
     Shutdown,
@@ -38,7 +62,7 @@ pub async fn run_discord_client(
     status_tx: mpsc::Sender<DiscordStatus>,
 ) {
     let mut backoff_ms = initial_backoff_ms();
-    let mut last_activity: Option<(TrackInfo, Option<String>, i64)> = None;
+    let mut last_activity: Option<CachedActivity> = None;
     let mut is_reconnect = false;
 
     loop {
@@ -80,7 +104,7 @@ pub async fn run_discord_client(
 
 async fn connect_and_run(
     cmd_rx: &mut mpsc::Receiver<DiscordCommand>,
-    last_activity: &mut Option<(TrackInfo, Option<String>, i64)>,
+    last_activity: &mut Option<CachedActivity>,
     is_reconnect: bool,
     helper_cmd_tx: &mpsc::Sender<HelperCommand>,
     status_tx: &mpsc::Sender<DiscordStatus>,
@@ -108,7 +132,7 @@ async fn connect_and_run(
     }
 
     // Re-publish last known activity after reconnect.
-    if let Some((track, artwork_url, started_at)) = last_activity.clone() {
+    if let Some(cached) = last_activity.clone() {
         // Discord's daemon needs a moment after the handshake before it will
         // actually surface a set_activity; the wire write succeeds immediately
         // but the activity is silently dropped if sent too soon.
@@ -118,7 +142,7 @@ async fn connect_and_run(
         .await;
         let client_for_publish = client.clone();
         let publish_result = tokio::task::spawn_blocking(move || {
-            let activity = build_activity(&track, artwork_url.as_deref(), started_at);
+            let activity = cached.build();
             if let Ok(mut c) = client_for_publish.lock() {
                 c.set_activity(activity)
             } else {
@@ -158,10 +182,10 @@ async fn connect_and_run(
             _ = heartbeat.tick() => {
                 // Re-send last_activity to detect a dead IPC socket. Idempotent on
                 // Discord's side — same data means no UI change.
-                if let Some((track, artwork_url, started_at)) = last_activity.clone() {
+                if let Some(cached) = last_activity.clone() {
                     let client_hb = client.clone();
                     let hb_result = tokio::task::spawn_blocking(move || {
-                        let activity = build_activity(&track, artwork_url.as_deref(), started_at);
+                        let activity = cached.build();
                         if let Ok(mut c) = client_hb.lock() {
                             c.set_activity(activity)
                         } else {
@@ -183,15 +207,21 @@ async fn connect_and_run(
             DiscordCommand::SetActivity {
                 track,
                 artwork_url,
+                track_url,
                 started_at,
+                duration_secs,
             } => {
-                // Update last_activity state.
-                *last_activity = Some((track.clone(), artwork_url.clone(), started_at));
+                let cached = CachedActivity {
+                    track: track.clone(),
+                    artwork_url: artwork_url.clone(),
+                    track_url: track_url.clone(),
+                    started_at,
+                    duration_secs,
+                };
+                *last_activity = Some(cached.clone());
                 let client = client.clone();
                 let ipc_result = tokio::task::spawn_blocking(move || {
-                    // build_activity borrows from track/artwork_url, so we call it
-                    // inside this closure where those values are owned and alive.
-                    let activity = build_activity(&track, artwork_url.as_deref(), started_at);
+                    let activity = cached.build();
                     if let Ok(mut c) = client.lock() {
                         c.set_activity(activity)
                     } else {

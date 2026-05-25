@@ -1,12 +1,12 @@
 use winit::event_loop::EventLoopProxy;
 
 use crate::artwork::cache::ArtworkCache;
-use crate::artwork::itunes::search_artwork;
+use crate::artwork::itunes::{search_track, TrackLookup};
 use crate::constants::{
     CHANNEL_BUFFER_SIZE, TRACK_DEBOUNCE_MS, TRAY_ERROR_DISCORD_DISCONNECTED_DETAIL,
     TRAY_ERROR_DISCORD_MESSAGE,
 };
-use crate::discord::activity::TrackInfo;
+use crate::discord::activity::{compute_started_at, TrackInfo};
 use crate::discord::client::{run_discord_client, DiscordCommand, DiscordStatus};
 use crate::media::debounce::Debouncer;
 use crate::media::event::{HelperCommand, MediaEvent};
@@ -18,6 +18,15 @@ use crate::tray::TrayState;
 #[derive(Debug)]
 pub enum AppCommand {
     Quit,
+}
+
+/// Cached Discord activity fields reused for position-only updates.
+#[derive(Debug, Clone)]
+struct ActiveTrack {
+    track: TrackInfo,
+    artwork_url: Option<String>,
+    track_url: Option<String>,
+    duration_secs: Option<u64>,
 }
 
 /// Tracks tray-affecting health so we can restore content state after recovery.
@@ -61,6 +70,35 @@ impl TrayHealth {
     }
 }
 
+fn now_unix_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
+fn debounce_secs() -> u64 {
+    TRACK_DEBOUNCE_MS / 1000
+}
+
+async fn send_set_activity(
+    discord_tx: &tokio::sync::mpsc::Sender<DiscordCommand>,
+    active: &ActiveTrack,
+    elapsed_secs: Option<u64>,
+    debounce_secs: u64,
+) {
+    let started_at = compute_started_at(now_unix_secs(), elapsed_secs, debounce_secs);
+    let _ = discord_tx
+        .send(DiscordCommand::SetActivity {
+            track: active.track.clone(),
+            artwork_url: active.artwork_url.clone(),
+            track_url: active.track_url.clone(),
+            started_at,
+            duration_secs: active.duration_secs,
+        })
+        .await;
+}
+
 pub async fn run_pipeline(
     proxy: EventLoopProxy<UserEvent>,
     mut app_cmd_rx: tokio::sync::mpsc::Receiver<AppCommand>,
@@ -95,6 +133,7 @@ pub async fn run_pipeline(
     let http_client = reqwest::Client::new();
     let mut tray_health = TrayHealth::new();
     let mut last_sent: Option<TrayState> = None;
+    let mut active_track: Option<ActiveTrack> = None;
 
     let mut send_tray = |state: TrayState| {
         if last_sent.as_ref() == Some(&state) {
@@ -141,15 +180,40 @@ pub async fn run_pipeline(
                 }
             }
 
-            // Raw media events from the helper — debounce them.
+            // Raw media events from the helper.
             Some(event) = event_rx.recv() => {
-                debouncer.submit(event, debounced_tx.clone());
+                match &event {
+                    MediaEvent::PositionChanged { .. } => {
+                        if let MediaEvent::PositionChanged { elapsed_secs } = event {
+                            if let Some(active) = active_track.as_ref() {
+                                send_set_activity(
+                                    &discord_tx,
+                                    active,
+                                    Some(elapsed_secs),
+                                    0,
+                                )
+                                .await;
+                            }
+                        }
+                    }
+                    MediaEvent::PlaybackPaused | MediaEvent::PlaybackStopped => {
+                        active_track = None;
+                        debouncer.submit(event, debounced_tx.clone());
+                    }
+                    _ => debouncer.submit(event, debounced_tx.clone()),
+                }
             }
 
             // Debounced events — look up artwork, push to Discord, refresh tray.
             Some(event) = debounced_rx.recv() => {
                 match event {
-                    MediaEvent::TrackChanged { title, artist, album } => {
+                    MediaEvent::TrackChanged {
+                        title,
+                        artist,
+                        album,
+                        elapsed_secs,
+                        duration_secs,
+                    } => {
                         let track = TrackInfo {
                             title: title.clone(),
                             artist: artist.clone(),
@@ -162,43 +226,64 @@ pub async fn run_pipeline(
                         });
                         send_tray(tray_health.resolved());
 
-                        // Artwork: cache-first, then iTunes search.
-                        let artwork_url = if let Some(url) = artwork_cache.get(&artist, &title) {
-                            Some(url)
+                        // Artwork + track URL: cache-first, then iTunes search.
+                        let lookup = if let Some(cached) = artwork_cache.get(&artist, &title) {
+                            cached
                         } else {
-                            match search_artwork(&http_client, &artist, &title).await {
-                                Ok(Some(url)) => {
-                                    artwork_cache.insert(&artist, &title, url.clone());
+                            match search_track(&http_client, &artist, &title).await {
+                                Ok(Some(found)) => {
+                                    artwork_cache.insert(&artist, &title, found.clone());
                                     let cache_snapshot = artwork_cache.clone();
                                     tokio::task::spawn_blocking(move || {
                                         if let Err(e) = cache_snapshot.save() {
                                             tracing::warn!("failed to persist artwork cache: {e}");
                                         }
                                     });
-                                    Some(url)
+                                    found
                                 }
-                                Ok(None) => None,
+                                Ok(None) => TrackLookup {
+                                    artwork_url: None,
+                                    track_url: None,
+                                    duration_secs: None,
+                                },
                                 Err(e) => {
                                     tracing::warn!("artwork lookup failed: {e}");
-                                    None
+                                    TrackLookup {
+                                        artwork_url: None,
+                                        track_url: None,
+                                        duration_secs: None,
+                                    }
                                 }
                             }
                         };
 
-                        let started_at = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs() as i64;
+                        let resolved_duration = duration_secs.or(lookup.duration_secs);
 
-                        let _ = discord_tx
-                            .send(DiscordCommand::SetActivity { track, artwork_url, started_at })
-                            .await;
+                        let active = ActiveTrack {
+                            track: track.clone(),
+                            artwork_url: lookup.artwork_url.clone(),
+                            track_url: lookup.track_url.clone(),
+                            duration_secs: resolved_duration,
+                        };
+                        active_track = Some(active.clone());
+                        send_set_activity(
+                            &discord_tx,
+                            &active,
+                            elapsed_secs,
+                            debounce_secs(),
+                        )
+                        .await;
                     }
 
                     MediaEvent::PlaybackPaused | MediaEvent::PlaybackStopped => {
+                        active_track = None;
                         tray_health.set_content(TrayState::Idle);
                         send_tray(tray_health.resolved());
                         let _ = discord_tx.send(DiscordCommand::ClearActivity).await;
+                    }
+
+                    MediaEvent::PositionChanged { .. } => {
+                        // Position updates are handled on the raw event path.
                     }
                 }
             }
@@ -245,7 +330,10 @@ mod tests {
         health.discord_error_detail = Some("discord ipc: pipe closed".to_string());
 
         let state = health.resolved();
-        assert_eq!(state.label(), format!("Relay: {TRAY_ERROR_DISCORD_MESSAGE}"));
+        assert_eq!(
+            state.label(),
+            format!("Relay: {TRAY_ERROR_DISCORD_MESSAGE}")
+        );
         assert_eq!(state.error_detail(), Some("discord ipc: pipe closed"));
     }
 
