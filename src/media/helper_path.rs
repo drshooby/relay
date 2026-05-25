@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+const PROFILE: &str = env!("RELAY_BUILD_PROFILE");
+
 /// Resolve path to the bundled Swift helper binary.
 ///
 /// Resolution order (first match wins):
@@ -34,6 +36,6 @@ pub fn resolve_helper_path() -> PathBuf {
     // 3. Fallback: next to cargo workspace target dir
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("target")
-        .join("debug")
-        .join("relay-helper")
+        .join(PROFILE)
+        .join(crate::constants::HELPER_BINARY_NAME)
 }

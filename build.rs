@@ -1,9 +1,13 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+// Must match constants::HELPER_BINARY_NAME in src/constants.rs
 const HELPER_BINARY_NAME: &str = "relay-helper";
 
 fn main() {
+    let profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".into());
+    println!("cargo:rustc-env=RELAY_BUILD_PROFILE={profile}");
+
     // Only compile on macOS
     if std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default() != "macos" {
         return;

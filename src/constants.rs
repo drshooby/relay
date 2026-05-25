@@ -14,6 +14,10 @@ mod tests {
     use super::*;
     #[test]
     fn discord_client_id_matches_app_id_file() {
-        assert_eq!(DISCORD_CLIENT_ID, "1508293679427616768");
+        let app_id = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("APP_ID"),
+        )
+        .expect("APP_ID file should exist at repo root");
+        assert_eq!(DISCORD_CLIENT_ID, app_id.trim());
     }
 }
