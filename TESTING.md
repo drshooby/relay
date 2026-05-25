@@ -19,3 +19,8 @@ Prerequisites: macOS, Apple Music, Xcode CLI tools (`swiftc`).
 
 ## Shutdown
 - [ ] SIGINT (Ctrl+C) → clean exit, no zombie process
+
+## Discord RPC
+- [ ] With Discord running, app sets activity and Discord profile shows **"Listening to"** not "Playing"
+- [ ] Track title appears as details, "Artist · Album" as state
+- [ ] Artwork visible (large image) when available
