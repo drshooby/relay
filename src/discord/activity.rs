@@ -16,11 +16,14 @@ pub struct TrackInfo {
 
 /// Compute Discord activity `start` timestamp from elapsed playback position.
 ///
-/// - `debounce_secs`: extra elapsed to account for track-change debounce delay.
+/// - `debounce_ms`: extra elapsed to account for track-change debounce delay.
 /// - Returns `now_secs` when elapsed is unknown.
-pub fn compute_started_at(now_secs: i64, elapsed_secs: Option<u64>, debounce_secs: u64) -> i64 {
+pub fn compute_started_at(now_secs: i64, elapsed_secs: Option<u64>, debounce_ms: u64) -> i64 {
     match elapsed_secs {
-        Some(elapsed) => now_secs.saturating_sub(elapsed.saturating_add(debounce_secs) as i64),
+        Some(elapsed) => {
+            let compensated_secs = elapsed.saturating_mul(1000).saturating_add(debounce_ms) / 1000;
+            now_secs.saturating_sub(compensated_secs as i64)
+        }
         None => now_secs,
     }
 }
@@ -236,13 +239,19 @@ mod tests {
 
     #[test]
     fn compute_started_at_with_elapsed_and_debounce() {
-        let started = compute_started_at(1_000, Some(127), 1);
+        let started = compute_started_at(1_000, Some(127), 1_000);
+        assert_eq!(started, 872);
+    }
+
+    #[test]
+    fn compute_started_at_compensates_fractional_debounce_ms() {
+        let started = compute_started_at(1_000, Some(127), 1_500);
         assert_eq!(started, 872);
     }
 
     #[test]
     fn compute_started_at_without_elapsed_uses_now() {
-        let started = compute_started_at(1_000, None, 1);
+        let started = compute_started_at(1_000, None, 1_500);
         assert_eq!(started, 1_000);
     }
 

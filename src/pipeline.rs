@@ -77,17 +77,13 @@ fn now_unix_secs() -> i64 {
         .as_secs() as i64
 }
 
-fn debounce_secs() -> u64 {
-    TRACK_DEBOUNCE_MS / 1000
-}
-
 async fn send_set_activity(
     discord_tx: &tokio::sync::mpsc::Sender<DiscordCommand>,
     active: &ActiveTrack,
     elapsed_secs: Option<u64>,
-    debounce_secs: u64,
+    debounce_ms: u64,
 ) {
-    let started_at = compute_started_at(now_unix_secs(), elapsed_secs, debounce_secs);
+    let started_at = compute_started_at(now_unix_secs(), elapsed_secs, debounce_ms);
     let _ = discord_tx
         .send(DiscordCommand::SetActivity {
             track: active.track.clone(),
@@ -196,11 +192,16 @@ pub async fn run_pipeline(
                             }
                         }
                     }
+                    MediaEvent::TrackChanged { .. } => {
+                        // Drop stale metadata until debounce completes so position_changed
+                        // cannot advance the progress bar for the previous track.
+                        active_track = None;
+                        debouncer.submit(event, debounced_tx.clone());
+                    }
                     MediaEvent::PlaybackPaused | MediaEvent::PlaybackStopped => {
                         active_track = None;
                         debouncer.submit(event, debounced_tx.clone());
                     }
-                    _ => debouncer.submit(event, debounced_tx.clone()),
                 }
             }
 
@@ -270,7 +271,7 @@ pub async fn run_pipeline(
                             &discord_tx,
                             &active,
                             elapsed_secs,
-                            debounce_secs(),
+                            TRACK_DEBOUNCE_MS,
                         )
                         .await;
                     }

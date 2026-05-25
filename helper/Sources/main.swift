@@ -14,6 +14,7 @@ func emit(_ event: [String: String]) {
 }
 
 /// Minimum elapsed-time delta (seconds) before emitting position_changed.
+/// Must match `POSITION_CHANGE_THRESHOLD_SECS` in `src/constants.rs`.
 let positionChangeThresholdSecs = 3
 
 // Track last emitted title to suppress duplicate track_changed events

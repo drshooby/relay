@@ -102,7 +102,11 @@ impl ArtworkCache {
                 return None;
             }
             return Some(TrackLookup {
-                artwork_url: Some(entry.url.clone()),
+                artwork_url: if entry.url.is_empty() {
+                    None
+                } else {
+                    Some(entry.url.clone())
+                },
                 track_url: entry.track_url.clone(),
                 duration_secs: entry.duration_secs,
             });
@@ -111,11 +115,15 @@ impl ArtworkCache {
     }
 
     /// Store artwork URL and optional track link in the cache.
-    /// No-op if artwork_url is absent.
+    /// No-op when artwork, track URL, and duration are all absent.
     pub fn insert(&mut self, artist: &str, title: &str, lookup: TrackLookup) {
-        let Some(artwork_url) = lookup.artwork_url else {
+        if lookup.artwork_url.is_none()
+            && lookup.track_url.is_none()
+            && lookup.duration_secs.is_none()
+        {
             return;
-        };
+        }
+        let artwork_url = lookup.artwork_url.unwrap_or_default();
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or(Duration::ZERO)
@@ -210,6 +218,27 @@ mod tests {
             result.track_url.as_deref(),
             Some("https://music.apple.com/track/1")
         );
+    }
+
+    #[test]
+    fn insert_without_artwork_still_caches_track_url() {
+        let mut cache = ArtworkCache::new();
+        cache.insert(
+            "Artist",
+            "Song",
+            TrackLookup {
+                artwork_url: None,
+                track_url: Some("https://music.apple.com/track/1".into()),
+                duration_secs: Some(200),
+            },
+        );
+        let result = cache.get("Artist", "Song").unwrap();
+        assert!(result.artwork_url.is_none());
+        assert_eq!(
+            result.track_url.as_deref(),
+            Some("https://music.apple.com/track/1")
+        );
+        assert_eq!(result.duration_secs, Some(200));
     }
 
     #[test]
