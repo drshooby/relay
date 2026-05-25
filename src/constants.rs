@@ -21,6 +21,15 @@ pub const ITUNES_ARTWORK_SIZE_SMALL: &str = "100x100";
 pub const ITUNES_ARTWORK_SIZE_LARGE: &str = "600x600";
 pub const HELPER_BINARY_NAME: &str = "relay-helper";
 
+pub const TRAY_ICON_RELAY: &[u8] = include_bytes!("../assets/icons/relay.png");
+/// Alpha multiplier for the error-state tray icon (0–255). Template icons use alpha as the mask,
+/// so dimming reads as grayed out in the menu bar.
+pub const TRAY_ICON_ERROR_ALPHA: u8 = 128;
+
+pub const TRAY_ERROR_HELPER_MESSAGE: &str = "media access unavailable";
+pub const TRAY_ERROR_DISCORD_MESSAGE: &str = "discord unavailable";
+pub const TRAY_ERROR_DISCORD_DISCONNECTED_DETAIL: &str = "discord ipc: disconnected";
+
 #[cfg(test)]
 mod tests {
     use super::*;

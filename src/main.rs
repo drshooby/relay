@@ -9,19 +9,16 @@ fn main() -> anyhow::Result<()> {
         .with_env_filter(EnvFilter::from_default_env())
         .init();
 
-    // 2. Load config — fall back to defaults on error (app should always start).
-    let config = relay::config::load().unwrap_or_default();
-
-    // 3. Cross-thread channel: main → Tokio (commands).
+    // 2. Cross-thread channel: main → Tokio (commands).
     //    tokio::sync::mpsc works here: the main (winit) thread uses blocking_send,
     //    the Tokio pipeline uses .recv().await.
     let (app_cmd_tx, app_cmd_rx) = tokio::sync::mpsc::channel::<AppCommand>(8);
 
-    // 4. Build winit event loop on the main thread (macOS requirement).
+    // 3. Build winit event loop on the main thread (macOS requirement).
     let event_loop = build_event_loop();
     let proxy = event_loop.create_proxy();
 
-    // 5. Spawn the Tokio runtime on a dedicated OS thread so it never blocks the main thread.
+    // 4. Spawn the Tokio runtime on a dedicated OS thread so it never blocks the main thread.
     let _tokio_thread = std::thread::spawn(move || {
         // multi_thread scheduler: work-stealing pool.
         let rt = tokio::runtime::Builder::new_multi_thread()
@@ -31,11 +28,11 @@ fn main() -> anyhow::Result<()> {
             .expect("failed to create tokio runtime");
 
         rt.block_on(async move {
-            run_pipeline(proxy, app_cmd_rx, config.enabled).await;
+            run_pipeline(proxy, app_cmd_rx).await;
         });
     });
 
-    // 6. Run the winit event loop on the main thread (blocks until exit).
+    // 5. Run the winit event loop on the main thread (blocks until exit).
     run_event_loop(event_loop, app_cmd_tx)?;
 
     Ok(())

@@ -2,9 +2,12 @@ use winit::event_loop::EventLoopProxy;
 
 use crate::artwork::cache::ArtworkCache;
 use crate::artwork::itunes::search_artwork;
-use crate::constants::{CHANNEL_BUFFER_SIZE, TRACK_DEBOUNCE_MS};
+use crate::constants::{
+    CHANNEL_BUFFER_SIZE, TRACK_DEBOUNCE_MS, TRAY_ERROR_DISCORD_DISCONNECTED_DETAIL,
+    TRAY_ERROR_DISCORD_MESSAGE,
+};
 use crate::discord::activity::TrackInfo;
-use crate::discord::client::{run_discord_client, DiscordCommand};
+use crate::discord::client::{run_discord_client, DiscordCommand, DiscordStatus};
 use crate::media::debounce::Debouncer;
 use crate::media::event::{HelperCommand, MediaEvent};
 use crate::media::reader;
@@ -14,20 +17,60 @@ use crate::tray::TrayState;
 /// Commands sent from the main (winit) thread to the Tokio pipeline.
 #[derive(Debug)]
 pub enum AppCommand {
-    SetEnabled(bool),
     Quit,
+}
+
+/// Tracks tray-affecting health so we can restore content state after recovery.
+struct TrayHealth {
+    helper_error: Option<TrayState>,
+    discord_connected: bool,
+    discord_was_connected: bool,
+    discord_error_detail: Option<String>,
+    content: TrayState,
+}
+
+impl TrayHealth {
+    fn new() -> Self {
+        Self {
+            helper_error: None,
+            discord_connected: false,
+            discord_was_connected: false,
+            discord_error_detail: None,
+            content: TrayState::Idle,
+        }
+    }
+
+    fn set_content(&mut self, state: TrayState) {
+        self.content = state;
+    }
+
+    fn resolved(&self) -> TrayState {
+        if let Some(err) = &self.helper_error {
+            return err.clone();
+        }
+        if self.discord_was_connected && !self.discord_connected {
+            return TrayState::Error {
+                message: TRAY_ERROR_DISCORD_MESSAGE.to_string(),
+                detail: self
+                    .discord_error_detail
+                    .clone()
+                    .unwrap_or_else(|| TRAY_ERROR_DISCORD_DISCONNECTED_DETAIL.to_string()),
+            };
+        }
+        self.content.clone()
+    }
 }
 
 pub async fn run_pipeline(
     proxy: EventLoopProxy<UserEvent>,
     mut app_cmd_rx: tokio::sync::mpsc::Receiver<AppCommand>,
-    initial_enabled: bool,
 ) {
     use tokio::sync::mpsc;
 
     let (event_tx, mut event_rx) = mpsc::channel::<MediaEvent>(CHANNEL_BUFFER_SIZE);
     let (status_tx, mut status_rx) = mpsc::channel(4);
     let (discord_tx, discord_rx) = mpsc::channel::<DiscordCommand>(CHANNEL_BUFFER_SIZE);
+    let (discord_status_tx, mut discord_status_rx) = mpsc::channel::<DiscordStatus>(8);
     let (helper_cmd_tx, helper_cmd_rx) = mpsc::channel::<HelperCommand>(8);
 
     // Spawn the Swift helper reader/writer.
@@ -38,7 +81,7 @@ pub async fn run_pipeline(
     // Spawn the Discord RPC client. Receives helper_cmd_tx so it can request
     // a fresh state snapshot from the helper after a reconnect.
     tokio::spawn(async move {
-        run_discord_client(discord_rx, helper_cmd_tx).await;
+        run_discord_client(discord_rx, helper_cmd_tx, discord_status_tx).await;
     });
 
     // Pipeline state.
@@ -50,7 +93,16 @@ pub async fn run_pipeline(
         .and_then(|r| r.ok())
         .unwrap_or_default();
     let http_client = reqwest::Client::new();
-    let mut enabled = initial_enabled;
+    let mut tray_health = TrayHealth::new();
+    let mut last_sent: Option<TrayState> = None;
+
+    let mut send_tray = |state: TrayState| {
+        if last_sent.as_ref() == Some(&state) {
+            return;
+        }
+        last_sent = Some(state.clone());
+        let _ = proxy.send_event(UserEvent::StateUpdate(state));
+    };
 
     loop {
         tokio::select! {
@@ -58,15 +110,40 @@ pub async fn run_pipeline(
             Some(status) = status_rx.recv() => {
                 if let Some(error_state) = TrayState::from_helper_status(&status) {
                     tracing::error!("helper status: {error_state:?}");
-                    let _ = proxy.send_event(UserEvent::StateUpdate(error_state));
+                    tray_health.helper_error = Some(error_state);
+                    send_tray(tray_health.resolved());
+                }
+            }
+
+            Some(discord_status) = discord_status_rx.recv() => {
+                match discord_status {
+                    DiscordStatus::Connected => {
+                        tray_health.discord_connected = true;
+                        tray_health.discord_was_connected = true;
+                        tray_health.discord_error_detail = None;
+                        send_tray(tray_health.resolved());
+                    }
+                    DiscordStatus::Disconnected { detail } => {
+                        tray_health.discord_connected = false;
+                        tray_health.discord_error_detail = Some(detail);
+                        if tray_health.discord_was_connected {
+                            send_tray(tray_health.resolved());
+                        }
+                    }
+                    DiscordStatus::Reconnecting { backoff_ms } => {
+                        tray_health.discord_connected = false;
+                        tray_health.discord_error_detail =
+                            Some(format!("reconnecting in {backoff_ms}ms"));
+                        if tray_health.discord_was_connected {
+                            send_tray(tray_health.resolved());
+                        }
+                    }
                 }
             }
 
             // Raw media events from the helper — debounce them.
             Some(event) = event_rx.recv() => {
-                if enabled {
-                    debouncer.submit(event, debounced_tx.clone());
-                }
+                debouncer.submit(event, debounced_tx.clone());
             }
 
             // Debounced events — look up artwork, push to Discord, refresh tray.
@@ -79,10 +156,11 @@ pub async fn run_pipeline(
                             album,
                         };
 
-                        // Update tray label immediately.
-                        let _ = proxy.send_event(UserEvent::StateUpdate(
-                            TrayState::Playing { title: title.clone(), artist: artist.clone() },
-                        ));
+                        tray_health.set_content(TrayState::Playing {
+                            title: title.clone(),
+                            artist: artist.clone(),
+                        });
+                        send_tray(tray_health.resolved());
 
                         // Artwork: cache-first, then iTunes search.
                         let artwork_url = if let Some(url) = artwork_cache.get(&artist, &title) {
@@ -118,24 +196,16 @@ pub async fn run_pipeline(
                     }
 
                     MediaEvent::PlaybackPaused | MediaEvent::PlaybackStopped => {
-                        let _ = proxy.send_event(UserEvent::StateUpdate(TrayState::Idle));
+                        tray_health.set_content(TrayState::Idle);
+                        send_tray(tray_health.resolved());
                         let _ = discord_tx.send(DiscordCommand::ClearActivity).await;
                     }
                 }
             }
 
-            // App commands from the main thread (toggle / quit).
+            // App commands from the main thread (quit).
             cmd = app_cmd_rx.recv() => {
                 match cmd {
-                    Some(AppCommand::SetEnabled(val)) => {
-                        enabled = val;
-                        if !val {
-                            let _ = discord_tx.send(DiscordCommand::ClearActivity).await;
-                            let _ = proxy.send_event(UserEvent::StateUpdate(TrayState::Disabled));
-                        } else {
-                            let _ = proxy.send_event(UserEvent::StateUpdate(TrayState::Idle));
-                        }
-                    }
                     Some(AppCommand::Quit) => {
                         let _ = discord_tx.send(DiscordCommand::Shutdown).await;
                         break;
@@ -144,5 +214,74 @@ pub async fn run_pipeline(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::constants::{TRAY_ERROR_DISCORD_MESSAGE, TRAY_ERROR_HELPER_MESSAGE};
+
+    #[test]
+    fn resolved_prefers_helper_error_over_discord() {
+        let mut health = TrayHealth::new();
+        health.helper_error = Some(TrayState::Error {
+            message: TRAY_ERROR_HELPER_MESSAGE.to_string(),
+            detail: "helper exited".to_string(),
+        });
+        health.discord_connected = false;
+        health.discord_was_connected = true;
+        health.discord_error_detail = Some("discord ipc: lost".to_string());
+
+        let state = health.resolved();
+        assert_eq!(state.label(), format!("Relay: {TRAY_ERROR_HELPER_MESSAGE}"));
+    }
+
+    #[test]
+    fn resolved_shows_discord_error_after_disconnect() {
+        let mut health = TrayHealth::new();
+        health.discord_connected = false;
+        health.discord_was_connected = true;
+        health.discord_error_detail = Some("discord ipc: pipe closed".to_string());
+
+        let state = health.resolved();
+        assert_eq!(state.label(), format!("Relay: {TRAY_ERROR_DISCORD_MESSAGE}"));
+        assert_eq!(state.error_detail(), Some("discord ipc: pipe closed"));
+    }
+
+    #[test]
+    fn resolved_no_discord_error_before_first_connection() {
+        let health = TrayHealth::new();
+        assert_eq!(health.resolved(), TrayState::Idle);
+    }
+
+    #[test]
+    fn resolved_returns_content_when_healthy() {
+        let mut health = TrayHealth::new();
+        health.discord_connected = true;
+        health.discord_was_connected = true;
+        health.set_content(TrayState::Playing {
+            title: "Song".into(),
+            artist: "Artist".into(),
+        });
+
+        let state = health.resolved();
+        assert!(matches!(state, TrayState::Playing { .. }));
+    }
+
+    #[test]
+    fn resolved_recovers_content_after_discord_reconnect() {
+        let mut health = TrayHealth::new();
+        health.discord_was_connected = true;
+        health.discord_connected = false;
+        health.discord_error_detail = Some("reconnecting in 1000ms".to_string());
+        health.set_content(TrayState::Idle);
+
+        let err = health.resolved();
+        assert!(matches!(err, TrayState::Error { .. }));
+
+        health.discord_connected = true;
+        health.discord_error_detail = None;
+        assert_eq!(health.resolved(), TrayState::Idle);
     }
 }

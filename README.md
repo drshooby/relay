@@ -9,7 +9,7 @@ A macOS menu bar app that shows your Apple Music activity on Discord as "Listeni
 - Looks up album artwork from iTunes Search API, caches locally
 - Sets Discord Rich Presence: "Listening to" with track title, artist · album, artwork, and timestamp
 - Clears status on pause/stop
-- Menu bar icon with toggle (enable/disable) and quit
+- Menu bar icon (normal when healthy, dimmed on error) with status display and quit; runs as a menu-bar accessory (no Dock icon)
 
 ## Architecture
 
@@ -33,7 +33,9 @@ The Swift helper is compiled automatically by `build.rs` — no separate script 
 
     ./target/release/relay
 
-The app appears in your menu bar. Make sure Discord is running before launching.
+The app appears in your menu bar (no Dock tile). Make sure Discord is running before launching.
+
+When packaged as `Relay.app`, use [`packaging/Info.plist`](packaging/Info.plist) (`LSUIElement`) alongside the winit accessory policy.
 
 ## Login Items (auto-launch)
 

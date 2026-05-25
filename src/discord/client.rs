@@ -19,6 +19,14 @@ pub enum DiscordCommand {
     Shutdown,
 }
 
+/// Connection lifecycle events for tray / pipeline UI.
+#[derive(Debug, Clone)]
+pub enum DiscordStatus {
+    Connected,
+    Disconnected { detail: String },
+    Reconnecting { backoff_ms: u64 },
+}
+
 /// Run the Discord RPC client task.
 /// Reconnects with exponential backoff on failure. After a reconnect, the last
 /// known activity is re-published immediately for fast visual feedback, and a
@@ -27,6 +35,7 @@ pub enum DiscordCommand {
 pub async fn run_discord_client(
     mut cmd_rx: mpsc::Receiver<DiscordCommand>,
     helper_cmd_tx: mpsc::Sender<HelperCommand>,
+    status_tx: mpsc::Sender<DiscordStatus>,
 ) {
     let mut backoff_ms = initial_backoff_ms();
     let mut last_activity: Option<(TrackInfo, Option<String>, i64)> = None;
@@ -38,12 +47,28 @@ pub async fn run_discord_client(
             &mut last_activity,
             is_reconnect,
             &helper_cmd_tx,
+            &status_tx,
         )
         .await
         {
             Ok(()) => break, // clean shutdown (Shutdown command received)
             Err(e) => {
                 tracing::error!("Discord RPC disconnected: {e}");
+                let detail = format!("discord ipc: {e}");
+                if status_tx
+                    .send(DiscordStatus::Disconnected { detail })
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+                if status_tx
+                    .send(DiscordStatus::Reconnecting { backoff_ms })
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
                 tracing::info!("reconnecting in {backoff_ms}ms");
                 tokio::time::sleep(tokio::time::Duration::from_millis(backoff_ms)).await;
                 backoff_ms = next_backoff_ms(backoff_ms);
@@ -58,6 +83,7 @@ async fn connect_and_run(
     last_activity: &mut Option<(TrackInfo, Option<String>, i64)>,
     is_reconnect: bool,
     helper_cmd_tx: &mpsc::Sender<HelperCommand>,
+    status_tx: &mpsc::Sender<DiscordStatus>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Connect inside spawn_blocking — connect() is a blocking IPC call.
     // DiscordIpcClient::new() is infallible; only connect() can fail.
@@ -77,6 +103,9 @@ async fn connect_and_run(
     let client = std::sync::Arc::new(std::sync::Mutex::new(client));
 
     tracing::info!("Discord RPC connected");
+    if status_tx.send(DiscordStatus::Connected).await.is_err() {
+        return Ok(());
+    }
 
     // Re-publish last known activity after reconnect.
     if let Some((track, artwork_url, started_at)) = last_activity.clone() {
