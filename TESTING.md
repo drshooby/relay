@@ -24,3 +24,12 @@ Prerequisites: macOS, Apple Music, Xcode CLI tools (`swiftc`).
 - [ ] With Discord running, app sets activity and Discord profile shows **"Listening to"** not "Playing"
 - [ ] Track title appears as details, "Artist · Album" as state
 - [ ] Artwork visible (large image) when available
+
+## Tray
+
+- [ ] App launches, icon appears in menu bar
+- [ ] Menu opens on click
+- [ ] "Now Playing: ..." shows correct track info when playing
+- [ ] "Relay: Idle" shows when nothing playing
+- [ ] "Relay: Disabled" shows when toggle is off
+- [ ] "Relay: media access unavailable" shows on helper error
