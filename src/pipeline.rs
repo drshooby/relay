@@ -6,7 +6,7 @@ use crate::constants::{CHANNEL_BUFFER_SIZE, TRACK_DEBOUNCE_MS};
 use crate::discord::activity::TrackInfo;
 use crate::discord::client::{run_discord_client, DiscordCommand};
 use crate::media::debounce::Debouncer;
-use crate::media::event::MediaEvent;
+use crate::media::event::{HelperCommand, MediaEvent};
 use crate::media::reader;
 use crate::tray::event_loop::UserEvent;
 use crate::tray::TrayState;
@@ -28,15 +28,17 @@ pub async fn run_pipeline(
     let (event_tx, mut event_rx) = mpsc::channel::<MediaEvent>(CHANNEL_BUFFER_SIZE);
     let (status_tx, mut status_rx) = mpsc::channel(4);
     let (discord_tx, discord_rx) = mpsc::channel::<DiscordCommand>(CHANNEL_BUFFER_SIZE);
+    let (helper_cmd_tx, helper_cmd_rx) = mpsc::channel::<HelperCommand>(8);
 
-    // Spawn the Swift helper reader.
+    // Spawn the Swift helper reader/writer.
     tokio::spawn(async move {
-        reader::run_helper(event_tx, status_tx).await;
+        reader::run_helper(event_tx, status_tx, helper_cmd_rx).await;
     });
 
-    // Spawn the Discord RPC client.
+    // Spawn the Discord RPC client. Receives helper_cmd_tx so it can request
+    // a fresh state snapshot from the helper after a reconnect.
     tokio::spawn(async move {
-        run_discord_client(discord_rx).await;
+        run_discord_client(discord_rx, helper_cmd_tx).await;
     });
 
     // Pipeline state.

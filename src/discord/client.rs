@@ -6,6 +6,7 @@ use crate::constants::{
 };
 use crate::discord::activity::{build_activity, TrackInfo};
 use crate::discord::reconnect::{initial_backoff_ms, next_backoff_ms};
+use crate::media::event::HelperCommand;
 
 #[derive(Debug)]
 pub enum DiscordCommand {
@@ -19,20 +20,34 @@ pub enum DiscordCommand {
 }
 
 /// Run the Discord RPC client task.
-/// Reconnects with exponential backoff on failure.
-/// The last known activity is re-published after reconnect.
-pub async fn run_discord_client(mut cmd_rx: mpsc::Receiver<DiscordCommand>) {
+/// Reconnects with exponential backoff on failure. After a reconnect, the last
+/// known activity is re-published immediately for fast visual feedback, and a
+/// `HelperCommand::Refresh` is sent to the helper so the displayed track is
+/// corrected to the current ground truth from Music.app.
+pub async fn run_discord_client(
+    mut cmd_rx: mpsc::Receiver<DiscordCommand>,
+    helper_cmd_tx: mpsc::Sender<HelperCommand>,
+) {
     let mut backoff_ms = initial_backoff_ms();
     let mut last_activity: Option<(TrackInfo, Option<String>, i64)> = None;
+    let mut is_reconnect = false;
 
     loop {
-        match connect_and_run(&mut cmd_rx, &mut last_activity).await {
+        match connect_and_run(
+            &mut cmd_rx,
+            &mut last_activity,
+            is_reconnect,
+            &helper_cmd_tx,
+        )
+        .await
+        {
             Ok(()) => break, // clean shutdown (Shutdown command received)
             Err(e) => {
                 tracing::error!("Discord RPC disconnected: {e}");
                 tracing::info!("reconnecting in {backoff_ms}ms");
                 tokio::time::sleep(tokio::time::Duration::from_millis(backoff_ms)).await;
                 backoff_ms = next_backoff_ms(backoff_ms);
+                is_reconnect = true;
             }
         }
     }
@@ -41,6 +56,8 @@ pub async fn run_discord_client(mut cmd_rx: mpsc::Receiver<DiscordCommand>) {
 async fn connect_and_run(
     cmd_rx: &mut mpsc::Receiver<DiscordCommand>,
     last_activity: &mut Option<(TrackInfo, Option<String>, i64)>,
+    is_reconnect: bool,
+    helper_cmd_tx: &mpsc::Sender<HelperCommand>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Connect inside spawn_blocking — connect() is a blocking IPC call.
     // DiscordIpcClient::new() is infallible; only connect() can fail.
@@ -84,6 +101,16 @@ async fn connect_and_run(
         if let Err(e) = publish_result {
             tracing::warn!("failed to re-publish Discord activity after reconnect: {e}");
         }
+    }
+
+    // After a reconnect, the re-published activity above is whatever was cached
+    // when Discord died — possibly stale if the user changed tracks in the
+    // interim. Ask the helper for a fresh snapshot; the resulting track_changed
+    // (or playback_paused/stopped) flows through the pipeline and overwrites
+    // the stale display. On initial connect this is skipped — the helper's own
+    // startup snapshot already covers that.
+    if is_reconnect && helper_cmd_tx.send(HelperCommand::Refresh).await.is_err() {
+        tracing::warn!("helper command channel closed; cannot request refresh");
     }
 
     let mut heartbeat = tokio::time::interval(tokio::time::Duration::from_millis(

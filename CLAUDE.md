@@ -33,7 +33,9 @@ relay/
 
 ## IPC Contract (Rust ↔ Swift)
 
-Newline-delimited JSON over stdout. All fields are strings — no numbers, booleans, or nested objects.
+Bidirectional newline-delimited JSON. All fields are strings — no numbers, booleans, or nested objects.
+
+### Outbound (Swift → Rust over stdout)
 
 | Field | Type | Present when |
 |---|---|---|
@@ -45,6 +47,17 @@ Valid `event` values: `track_changed`, `playback_paused`, `playback_stopped`.
 - Unrecognised `event` → silently ignore (forward compat)
 - Malformed JSON → log warning, skip line, never crash
 - Omit optional fields instead of sending empty strings
+
+### Inbound (Rust → Swift over stdin)
+
+| Field | Type | Present when |
+|---|---|---|
+| `command` | string | always |
+
+Valid `command` values: `refresh` (re-query Music.app and emit the current state).
+
+- Unrecognised `command` → log to stderr, ignore
+- Malformed JSON → log to stderr, skip line, never crash
 
 ## Rust Standards
 
