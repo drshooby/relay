@@ -26,3 +26,6 @@ target
 helper/.build/
 
 .DS_Store
+
+.cursor/
+.claude/
