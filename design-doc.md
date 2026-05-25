@@ -23,7 +23,7 @@ A lightweight macOS menu bar daemon written in Rust that listens for Apple Music
 - Scrobbling (Last.fm etc.)
 - "Listen along" functionality
 - Animated album art
-- A settings UI beyond a menu bar toggle
+- A settings UI
 
 ---
 
@@ -84,7 +84,7 @@ A lightweight macOS menu bar daemon written in Rust that listens for Apple Music
 │                       └──────────────────────┘  │
 │                                                 │
 │  ┌─────────────┐                                │
-│  │  Menu Bar   │── toggle on/off                │
+│  │  Menu Bar   │── status display               │
 │  │  (tray UI)  │── quit                         │
 │  └─────────────┘                                │
 └─────────────────────────────────────────────────┘
@@ -99,7 +99,7 @@ A lightweight macOS menu bar daemon written in Rust that listens for Apple Music
 | `tokio` | Async runtime |
 | `reqwest` | iTunes Search API HTTP calls |
 | `serde` / `serde_json` | JSON parsing (iTunes API response, RPC payloads, IPC messages) |
-| `tray-icon` | macOS menu bar icon + toggle menu |
+| `tray-icon` | macOS menu bar icon + status menu |
 | `dirs` | Resolving config/cache paths (`~/Library/Application Support/`) |
 
 ---
@@ -211,10 +211,9 @@ The app is stateless between runs — it reads whatever is currently playing whe
 
 | What | Where | Format |
 |---|---|---|
-| User toggle preference (on/off) | `~/Library/Application Support/relay/config.toml` | TOML |
 | Artwork URL cache | `~/Library/Application Support/relay/artwork_cache.json` | JSON |
 
-The Discord `client_id` is hardcoded in v1 and does not appear in the config file.
+The Discord `client_id` is hardcoded in v1 and does not appear in the config file. A `config.toml` path is reserved for future settings but is unused in v1.
 
 ---
 
@@ -226,8 +225,7 @@ The Discord `client_id` is hardcoded in v1 and does not appear in the config fil
 | Discord closes mid-session | Detect socket disconnect, clear activity, retry |
 | Apple Music closes | Swift helper fires stop event → clear activity |
 | Swift helper fails to launch or crashes | Log error, show error state in menu bar, do not restart in tight loop |
-| App is toggled off | Clear activity immediately, stop reacting to events |
-| App is toggled on | Resume listening, pick up current track if playing |
+| User quits Relay | Clear Discord activity and exit |
 | Mac restarts | App does not auto-launch in v1 (user adds to Login Items manually) |
 | iTunes Search API fails | Skip artwork, set status without image |
 | 600x600 artwork URL 404s | Fall back to 100x100 URL |
@@ -241,14 +239,13 @@ The Discord `client_id` is hardcoded in v1 and does not appear in the config fil
 Minimal. Single icon in the menu bar with a dropdown:
 
 ```
-● Now Playing: Happier Than Ever — Billie Eilish   (greyed out, informational)
+● Now Playing: Happier Than Ever — Billie Eilish   (informational)
+  helper exited with code 1                        (error detail, when applicable)
 ─────────────────────────────────────────────────
-✓ Enabled
-─────────────────────────────────────────────────
-  Quit
+  Quit Relay
 ```
 
-When disabled or no track is playing, the "Now Playing" line shows an appropriate idle message. When the Swift helper fails, it shows an error message instead.
+When idle, the status line shows "Relay: Idle". When the Swift helper or Discord fails, the status and detail lines show an error; the icon dims to signal degraded state.
 
 ### Icon States
 
@@ -256,10 +253,8 @@ The menu bar icon itself reflects app state so the user never needs to click in 
 
 | State | Icon |
 |---|---|
-| Active, playing | Full opacity icon |
-| Enabled, nothing playing | Full opacity icon |
-| Disabled (toggled off) | Dimmed / greyed icon |
-| Error (Swift helper failed) | Icon with exclamation badge |
+| Healthy (idle or playing) | Full-opacity template icon |
+| Error (helper or Discord failure) | Dimmed template icon (reduced alpha) |
 
 No preferences window for v1.
 
@@ -267,11 +262,7 @@ No preferences window for v1.
 
 ## Configuration File (v1)
 
-`~/Library/Application Support/relay/config.toml`
-
-```toml
-enabled = true
-```
+No user-facing config in v1. `~/Library/Application Support/relay/config.toml` may exist from earlier builds; unknown keys are ignored. Settings will land here in a future version.
 
 ---
 
@@ -297,8 +288,8 @@ enabled = true
 - In-memory + on-disk artwork URL caching with lazy TTL eviction
 - Hardcoded Discord `client_id` — no developer portal setup required
 - Persistent Discord RPC connection with exponential backoff reconnect
-- Menu bar icon with on/off toggle, now-playing display, and quit
-- Icon state reflects app state (active, disabled, error)
+- Menu bar icon with now-playing display, error detail line, and quit
+- Icon state reflects health (normal or dimmed error)
 - Graceful degradation if Swift helper fails
 - Open source, MIT licensed
 

@@ -2,16 +2,9 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
-pub struct Config {
-    pub enabled: bool,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self { enabled: true }
-    }
-}
+/// Reserved for future user settings. Not loaded at startup in v1.
+#[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct Config {}
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -73,18 +66,26 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn load_missing_file_returns_default_enabled() {
+    fn load_missing_file_returns_default() {
         let dir = tempdir().unwrap();
         let cfg = load_from_dir(dir.path()).unwrap();
-        assert!(cfg.enabled);
+        assert_eq!(cfg, Config::default());
     }
 
     #[test]
-    fn save_and_reload_preserves_disabled_state() {
+    fn save_and_reload_round_trips() {
         let dir = tempdir().unwrap();
-        let cfg = Config { enabled: false };
+        let cfg = Config::default();
         save_to_dir(&cfg, dir.path()).unwrap();
         let reloaded = load_from_dir(dir.path()).unwrap();
-        assert!(!reloaded.enabled);
+        assert_eq!(reloaded, cfg);
+    }
+
+    #[test]
+    fn load_ignores_legacy_enabled_field() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("config.toml"), "enabled = false\n").unwrap();
+        let cfg = load_from_dir(dir.path()).unwrap();
+        assert_eq!(cfg, Config::default());
     }
 }

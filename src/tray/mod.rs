@@ -11,8 +11,6 @@ pub enum TrayState {
     Playing { title: String, artist: String },
     /// Not playing (idle)
     Idle,
-    /// User toggled off
-    Disabled,
     /// Error (helper or Discord failure)
     Error { message: String, detail: String },
 }
@@ -25,7 +23,6 @@ impl TrayState {
                 format!("Now Playing: {} \u{2014} {}", title, artist)
             }
             TrayState::Idle => "Relay: Idle".to_string(),
-            TrayState::Disabled => "Relay: Disabled".to_string(),
             TrayState::Error { message, .. } => format!("Relay: {}", message),
         }
     }
@@ -40,7 +37,6 @@ impl TrayState {
 
     pub fn icon_variant(&self) -> icons::TrayIconVariant {
         match self {
-            TrayState::Disabled => icons::TrayIconVariant::Disabled,
             TrayState::Error { .. } => icons::TrayIconVariant::Error,
             TrayState::Playing { .. } | TrayState::Idle => icons::TrayIconVariant::Normal,
         }
@@ -68,13 +64,6 @@ impl TrayState {
     }
 }
 
-/// Events emitted from tray UI to the Tokio pipeline.
-#[derive(Debug, Clone)]
-pub enum TrayEvent {
-    ToggleEnabled(bool),
-    Quit,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -100,10 +89,6 @@ mod tests {
             TrayState::Idle.icon_variant(),
             icons::TrayIconVariant::Normal
         );
-        assert_eq!(
-            TrayState::Disabled.icon_variant(),
-            icons::TrayIconVariant::Disabled
-        );
         let err = TrayState::Error {
             message: "x".into(),
             detail: "y".into(),
@@ -126,11 +111,6 @@ mod tests {
     #[test]
     fn label_idle() {
         assert_eq!(TrayState::Idle.label(), "Relay: Idle");
-    }
-
-    #[test]
-    fn label_disabled() {
-        assert_eq!(TrayState::Disabled.label(), "Relay: Disabled");
     }
 
     #[test]

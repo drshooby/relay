@@ -9,7 +9,7 @@ A macOS menu bar app that shows your Apple Music activity on Discord as "Listeni
 - Looks up album artwork from iTunes Search API, caches locally
 - Sets Discord Rich Presence: "Listening to" with track title, artist · album, artwork, and timestamp
 - Clears status on pause/stop
-- Menu bar icon (state-aware: normal, disabled, error) with toggle and quit; runs as a menu-bar accessory (no Dock icon)
+- Menu bar icon (normal when healthy, dimmed on error) with status display and quit; runs as a menu-bar accessory (no Dock icon)
 
 ## Architecture
 

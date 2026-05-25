@@ -4,7 +4,7 @@
 
 use std::time::{Duration, Instant};
 use tray_icon::{
-    menu::{CheckMenuItem, Menu, MenuItem},
+    menu::{Menu, MenuItem},
     TrayIcon, TrayIconBuilder,
 };
 use winit::{
@@ -47,7 +47,6 @@ pub struct RelayApp {
     tray_icon: Option<TrayIcon>,
     status_item: Option<MenuItem>,
     details_item: Option<MenuItem>,
-    enabled_item: Option<CheckMenuItem>,
     quit_item: Option<MenuItem>,
     last_icon_variant: Option<TrayIconVariant>,
 }
@@ -59,7 +58,6 @@ impl RelayApp {
             tray_icon: None,
             status_item: None,
             details_item: None,
-            enabled_item: None,
             quit_item: None,
             last_icon_variant: None,
         }
@@ -68,10 +66,9 @@ impl RelayApp {
     fn build_tray(&mut self) {
         let status_item = MenuItem::new(TrayState::Idle.label(), true, None);
         let details_item = MenuItem::new("", false, None);
-        let enabled_item = CheckMenuItem::new("Enabled", true, true, None);
         let quit_item = MenuItem::new("Quit Relay", true, None);
 
-        let menu = Menu::with_items(&[&status_item, &details_item, &enabled_item, &quit_item])
+        let menu = Menu::with_items(&[&status_item, &details_item, &quit_item])
             .expect("failed to build tray menu");
 
         let icon = icons::default_icon();
@@ -87,7 +84,6 @@ impl RelayApp {
 
         self.status_item = Some(status_item);
         self.details_item = Some(details_item);
-        self.enabled_item = Some(enabled_item);
         self.quit_item = Some(quit_item);
         self.tray_icon = Some(tray);
         self.last_icon_variant = Some(TrayIconVariant::Normal);
@@ -122,22 +118,24 @@ impl RelayApp {
     }
 
     fn handle_menu_event(&self, event: &tray_icon::menu::MenuEvent) {
-        let enabled_id = self.enabled_item.as_ref().map(|i| i.id().clone());
         let quit_id = self.quit_item.as_ref().map(|i| i.id().clone());
 
         if Some(&event.id) == quit_id.as_ref() {
             tracing::info!("quit requested via menu");
             let _ = self.app_cmd_tx.blocking_send(crate::AppCommand::Quit);
-        } else if Some(&event.id) == enabled_id.as_ref() {
-            let now_checked = self
-                .enabled_item
-                .as_ref()
-                .map(|i| i.is_checked())
-                .unwrap_or(false);
-            tracing::info!("enabled toggled to {now_checked}");
-            let _ = self
-                .app_cmd_tx
-                .blocking_send(crate::AppCommand::SetEnabled(now_checked));
+        }
+    }
+
+    fn is_quit_menu_event(&self, event: &tray_icon::menu::MenuEvent) -> bool {
+        self.quit_item
+            .as_ref()
+            .is_some_and(|item| event.id == item.id())
+    }
+
+    fn dispatch_menu_event(&mut self, event_loop: &ActiveEventLoop, event: &tray_icon::menu::MenuEvent) {
+        self.handle_menu_event(event);
+        if self.is_quit_menu_event(event) {
+            event_loop.exit();
         }
     }
 }
@@ -162,13 +160,10 @@ impl ApplicationHandler<UserEvent> for RelayApp {
             UserEvent::StateUpdate(state) => {
                 self.apply_state(&state);
             }
+            // tray-icon 0.19 does not integrate with winit; left-click opens the menu automatically.
             UserEvent::TrayIconEvent(_tray_event) => {}
             UserEvent::MenuEvent(menu_event) => {
-                self.handle_menu_event(&menu_event);
-                let quit_id = self.quit_item.as_ref().map(|i| i.id().clone());
-                if Some(&menu_event.id) == quit_id.as_ref() {
-                    event_loop.exit();
-                }
+                self.dispatch_menu_event(event_loop, &menu_event);
             }
         }
     }
@@ -177,11 +172,7 @@ impl ApplicationHandler<UserEvent> for RelayApp {
         while tray_icon::TrayIconEvent::receiver().try_recv().is_ok() {}
 
         while let Ok(ev) = tray_icon::menu::MenuEvent::receiver().try_recv() {
-            self.handle_menu_event(&ev);
-            let quit_id = self.quit_item.as_ref().map(|i| i.id().clone());
-            if Some(&ev.id) == quit_id.as_ref() {
-                event_loop.exit();
-            }
+            self.dispatch_menu_event(event_loop, &ev);
         }
 
         event_loop.set_control_flow(ControlFlow::WaitUntil(

@@ -3,7 +3,8 @@ use winit::event_loop::EventLoopProxy;
 use crate::artwork::cache::ArtworkCache;
 use crate::artwork::itunes::search_artwork;
 use crate::constants::{
-    CHANNEL_BUFFER_SIZE, TRACK_DEBOUNCE_MS, TRAY_ERROR_DISCORD_MESSAGE,
+    CHANNEL_BUFFER_SIZE, TRACK_DEBOUNCE_MS, TRAY_ERROR_DISCORD_DISCONNECTED_DETAIL,
+    TRAY_ERROR_DISCORD_MESSAGE,
 };
 use crate::discord::activity::TrackInfo;
 use crate::discord::client::{run_discord_client, DiscordCommand, DiscordStatus};
@@ -16,7 +17,6 @@ use crate::tray::TrayState;
 /// Commands sent from the main (winit) thread to the Tokio pipeline.
 #[derive(Debug)]
 pub enum AppCommand {
-    SetEnabled(bool),
     Quit,
 }
 
@@ -25,20 +25,18 @@ struct TrayHealth {
     helper_error: Option<TrayState>,
     discord_connected: bool,
     discord_was_connected: bool,
+    discord_error_detail: Option<String>,
     content: TrayState,
 }
 
 impl TrayHealth {
-    fn new(initial_enabled: bool) -> Self {
+    fn new() -> Self {
         Self {
             helper_error: None,
             discord_connected: false,
             discord_was_connected: false,
-            content: if initial_enabled {
-                TrayState::Idle
-            } else {
-                TrayState::Disabled
-            },
+            discord_error_detail: None,
+            content: TrayState::Idle,
         }
     }
 
@@ -46,35 +44,26 @@ impl TrayHealth {
         self.content = state;
     }
 
-    fn resolved(&self, enabled: bool) -> TrayState {
+    fn resolved(&self) -> TrayState {
         if let Some(err) = &self.helper_error {
             return err.clone();
         }
-        if enabled && self.discord_was_connected && !self.discord_connected {
+        if self.discord_was_connected && !self.discord_connected {
             return TrayState::Error {
                 message: TRAY_ERROR_DISCORD_MESSAGE.to_string(),
-                detail: "discord ipc: disconnected".to_string(),
+                detail: self
+                    .discord_error_detail
+                    .clone()
+                    .unwrap_or_else(|| TRAY_ERROR_DISCORD_DISCONNECTED_DETAIL.to_string()),
             };
         }
-        if enabled {
-            self.content.clone()
-        } else {
-            TrayState::Disabled
-        }
-    }
-
-    fn discord_error(detail: String) -> TrayState {
-        TrayState::Error {
-            message: TRAY_ERROR_DISCORD_MESSAGE.to_string(),
-            detail,
-        }
+        self.content.clone()
     }
 }
 
 pub async fn run_pipeline(
     proxy: EventLoopProxy<UserEvent>,
     mut app_cmd_rx: tokio::sync::mpsc::Receiver<AppCommand>,
-    initial_enabled: bool,
 ) {
     use tokio::sync::mpsc;
 
@@ -104,8 +93,7 @@ pub async fn run_pipeline(
         .and_then(|r| r.ok())
         .unwrap_or_default();
     let http_client = reqwest::Client::new();
-    let mut enabled = initial_enabled;
-    let mut tray_health = TrayHealth::new(initial_enabled);
+    let mut tray_health = TrayHealth::new();
     let mut last_sent: Option<TrayState> = None;
 
     let mut send_tray = |state: TrayState| {
@@ -123,7 +111,7 @@ pub async fn run_pipeline(
                 if let Some(error_state) = TrayState::from_helper_status(&status) {
                     tracing::error!("helper status: {error_state:?}");
                     tray_health.helper_error = Some(error_state);
-                    send_tray(tray_health.resolved(enabled));
+                    send_tray(tray_health.resolved());
                 }
             }
 
@@ -132,21 +120,22 @@ pub async fn run_pipeline(
                     DiscordStatus::Connected => {
                         tray_health.discord_connected = true;
                         tray_health.discord_was_connected = true;
-                        send_tray(tray_health.resolved(enabled));
+                        tray_health.discord_error_detail = None;
+                        send_tray(tray_health.resolved());
                     }
                     DiscordStatus::Disconnected { detail } => {
                         tray_health.discord_connected = false;
-                        if enabled && tray_health.discord_was_connected {
-                            send_tray(TrayHealth::discord_error(detail));
+                        tray_health.discord_error_detail = Some(detail);
+                        if tray_health.discord_was_connected {
+                            send_tray(tray_health.resolved());
                         }
                     }
                     DiscordStatus::Reconnecting { backoff_ms } => {
                         tray_health.discord_connected = false;
-                        if enabled && tray_health.discord_was_connected {
-                            send_tray(TrayHealth::discord_error(format!(
-                                "reconnecting in {}ms",
-                                backoff_ms
-                            )));
+                        tray_health.discord_error_detail =
+                            Some(format!("reconnecting in {backoff_ms}ms"));
+                        if tray_health.discord_was_connected {
+                            send_tray(tray_health.resolved());
                         }
                     }
                 }
@@ -154,9 +143,7 @@ pub async fn run_pipeline(
 
             // Raw media events from the helper — debounce them.
             Some(event) = event_rx.recv() => {
-                if enabled {
-                    debouncer.submit(event, debounced_tx.clone());
-                }
+                debouncer.submit(event, debounced_tx.clone());
             }
 
             // Debounced events — look up artwork, push to Discord, refresh tray.
@@ -173,7 +160,7 @@ pub async fn run_pipeline(
                             title: title.clone(),
                             artist: artist.clone(),
                         });
-                        send_tray(tray_health.resolved(enabled));
+                        send_tray(tray_health.resolved());
 
                         // Artwork: cache-first, then iTunes search.
                         let artwork_url = if let Some(url) = artwork_cache.get(&artist, &title) {
@@ -210,25 +197,15 @@ pub async fn run_pipeline(
 
                     MediaEvent::PlaybackPaused | MediaEvent::PlaybackStopped => {
                         tray_health.set_content(TrayState::Idle);
-                        send_tray(tray_health.resolved(enabled));
+                        send_tray(tray_health.resolved());
                         let _ = discord_tx.send(DiscordCommand::ClearActivity).await;
                     }
                 }
             }
 
-            // App commands from the main thread (toggle / quit).
+            // App commands from the main thread (quit).
             cmd = app_cmd_rx.recv() => {
                 match cmd {
-                    Some(AppCommand::SetEnabled(val)) => {
-                        enabled = val;
-                        if !val {
-                            let _ = discord_tx.send(DiscordCommand::ClearActivity).await;
-                            tray_health.set_content(TrayState::Disabled);
-                        } else {
-                            tray_health.set_content(TrayState::Idle);
-                        }
-                        send_tray(tray_health.resolved(enabled));
-                    }
                     Some(AppCommand::Quit) => {
                         let _ = discord_tx.send(DiscordCommand::Shutdown).await;
                         break;
@@ -237,5 +214,74 @@ pub async fn run_pipeline(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::constants::{TRAY_ERROR_DISCORD_MESSAGE, TRAY_ERROR_HELPER_MESSAGE};
+
+    #[test]
+    fn resolved_prefers_helper_error_over_discord() {
+        let mut health = TrayHealth::new();
+        health.helper_error = Some(TrayState::Error {
+            message: TRAY_ERROR_HELPER_MESSAGE.to_string(),
+            detail: "helper exited".to_string(),
+        });
+        health.discord_connected = false;
+        health.discord_was_connected = true;
+        health.discord_error_detail = Some("discord ipc: lost".to_string());
+
+        let state = health.resolved();
+        assert_eq!(state.label(), format!("Relay: {TRAY_ERROR_HELPER_MESSAGE}"));
+    }
+
+    #[test]
+    fn resolved_shows_discord_error_after_disconnect() {
+        let mut health = TrayHealth::new();
+        health.discord_connected = false;
+        health.discord_was_connected = true;
+        health.discord_error_detail = Some("discord ipc: pipe closed".to_string());
+
+        let state = health.resolved();
+        assert_eq!(state.label(), format!("Relay: {TRAY_ERROR_DISCORD_MESSAGE}"));
+        assert_eq!(state.error_detail(), Some("discord ipc: pipe closed"));
+    }
+
+    #[test]
+    fn resolved_no_discord_error_before_first_connection() {
+        let health = TrayHealth::new();
+        assert_eq!(health.resolved(), TrayState::Idle);
+    }
+
+    #[test]
+    fn resolved_returns_content_when_healthy() {
+        let mut health = TrayHealth::new();
+        health.discord_connected = true;
+        health.discord_was_connected = true;
+        health.set_content(TrayState::Playing {
+            title: "Song".into(),
+            artist: "Artist".into(),
+        });
+
+        let state = health.resolved();
+        assert!(matches!(state, TrayState::Playing { .. }));
+    }
+
+    #[test]
+    fn resolved_recovers_content_after_discord_reconnect() {
+        let mut health = TrayHealth::new();
+        health.discord_was_connected = true;
+        health.discord_connected = false;
+        health.discord_error_detail = Some("reconnecting in 1000ms".to_string());
+        health.set_content(TrayState::Idle);
+
+        let err = health.resolved();
+        assert!(matches!(err, TrayState::Error { .. }));
+
+        health.discord_connected = true;
+        health.discord_error_detail = None;
+        assert_eq!(health.resolved(), TrayState::Idle);
     }
 }
