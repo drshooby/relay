@@ -21,6 +21,22 @@ pub enum HelperStatus {
     IoError,
 }
 
+/// Commands sent from Rust to the Swift helper over stdin (newline-delimited JSON).
+#[derive(Debug, Clone)]
+pub enum HelperCommand {
+    /// Re-query Music.app's current state and emit a corresponding event.
+    Refresh,
+}
+
+impl HelperCommand {
+    /// Serialise to the on-wire JSON line (including trailing newline).
+    pub fn to_json_line(&self) -> &'static str {
+        match self {
+            HelperCommand::Refresh => "{\"command\":\"refresh\"}\n",
+        }
+    }
+}
+
 /// Parse a single line of JSON into a MediaEvent.
 /// Returns None for unknown event types (forward compat) or malformed JSON (logs warning).
 pub fn parse_event_line(line: &str) -> Option<MediaEvent> {

@@ -1,9 +1,12 @@
 use discord_rich_presence::{DiscordIpc, DiscordIpcClient};
 use tokio::sync::mpsc;
 
-use crate::constants::DISCORD_CLIENT_ID;
+use crate::constants::{
+    DISCORD_CLIENT_ID, DISCORD_HEARTBEAT_INTERVAL_MS, DISCORD_POST_CONNECT_DELAY_MS,
+};
 use crate::discord::activity::{build_activity, TrackInfo};
 use crate::discord::reconnect::{initial_backoff_ms, next_backoff_ms};
+use crate::media::event::HelperCommand;
 
 #[derive(Debug)]
 pub enum DiscordCommand {
@@ -17,20 +20,34 @@ pub enum DiscordCommand {
 }
 
 /// Run the Discord RPC client task.
-/// Reconnects with exponential backoff on failure.
-/// The last known activity is re-published after reconnect.
-pub async fn run_discord_client(mut cmd_rx: mpsc::Receiver<DiscordCommand>) {
+/// Reconnects with exponential backoff on failure. After a reconnect, the last
+/// known activity is re-published immediately for fast visual feedback, and a
+/// `HelperCommand::Refresh` is sent to the helper so the displayed track is
+/// corrected to the current ground truth from Music.app.
+pub async fn run_discord_client(
+    mut cmd_rx: mpsc::Receiver<DiscordCommand>,
+    helper_cmd_tx: mpsc::Sender<HelperCommand>,
+) {
     let mut backoff_ms = initial_backoff_ms();
     let mut last_activity: Option<(TrackInfo, Option<String>, i64)> = None;
+    let mut is_reconnect = false;
 
     loop {
-        match connect_and_run(&mut cmd_rx, &mut last_activity).await {
+        match connect_and_run(
+            &mut cmd_rx,
+            &mut last_activity,
+            is_reconnect,
+            &helper_cmd_tx,
+        )
+        .await
+        {
             Ok(()) => break, // clean shutdown (Shutdown command received)
             Err(e) => {
                 tracing::error!("Discord RPC disconnected: {e}");
                 tracing::info!("reconnecting in {backoff_ms}ms");
                 tokio::time::sleep(tokio::time::Duration::from_millis(backoff_ms)).await;
                 backoff_ms = next_backoff_ms(backoff_ms);
+                is_reconnect = true;
             }
         }
     }
@@ -39,6 +56,8 @@ pub async fn run_discord_client(mut cmd_rx: mpsc::Receiver<DiscordCommand>) {
 async fn connect_and_run(
     cmd_rx: &mut mpsc::Receiver<DiscordCommand>,
     last_activity: &mut Option<(TrackInfo, Option<String>, i64)>,
+    is_reconnect: bool,
+    helper_cmd_tx: &mpsc::Sender<HelperCommand>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Connect inside spawn_blocking — connect() is a blocking IPC call.
     // DiscordIpcClient::new() is infallible; only connect() can fail.
@@ -61,20 +80,76 @@ async fn connect_and_run(
 
     // Re-publish last known activity after reconnect.
     if let Some((track, artwork_url, started_at)) = last_activity.clone() {
-        let client = client.clone();
-        tokio::task::spawn_blocking(move || {
+        // Discord's daemon needs a moment after the handshake before it will
+        // actually surface a set_activity; the wire write succeeds immediately
+        // but the activity is silently dropped if sent too soon.
+        tokio::time::sleep(tokio::time::Duration::from_millis(
+            DISCORD_POST_CONNECT_DELAY_MS,
+        ))
+        .await;
+        let client_for_publish = client.clone();
+        let publish_result = tokio::task::spawn_blocking(move || {
             let activity = build_activity(&track, artwork_url.as_deref(), started_at);
-            if let Ok(mut c) = client.lock() {
-                if let Err(e) = c.set_activity(activity) {
-                    tracing::warn!("failed to re-publish Discord activity after reconnect: {e}");
-                }
+            if let Ok(mut c) = client_for_publish.lock() {
+                c.set_activity(activity)
+            } else {
+                Ok(())
             }
         })
         .await
-        .ok();
+        .unwrap_or(Ok(()));
+        if let Err(e) = publish_result {
+            tracing::warn!("failed to re-publish Discord activity after reconnect: {e}");
+        }
     }
 
-    while let Some(cmd) = cmd_rx.recv().await {
+    // After a reconnect, the re-published activity above is whatever was cached
+    // when Discord died — possibly stale if the user changed tracks in the
+    // interim. Ask the helper for a fresh snapshot; the resulting track_changed
+    // (or playback_paused/stopped) flows through the pipeline and overwrites
+    // the stale display. On initial connect this is skipped — the helper's own
+    // startup snapshot already covers that.
+    if is_reconnect && helper_cmd_tx.send(HelperCommand::Refresh).await.is_err() {
+        tracing::warn!("helper command channel closed; cannot request refresh");
+    }
+
+    let mut heartbeat = tokio::time::interval(tokio::time::Duration::from_millis(
+        DISCORD_HEARTBEAT_INTERVAL_MS,
+    ));
+    // Skip the immediate first tick; we already wrote (or had nothing to write)
+    // during the re-publish phase above.
+    heartbeat.tick().await;
+
+    loop {
+        let cmd = tokio::select! {
+            cmd = cmd_rx.recv() => match cmd {
+                Some(c) => c,
+                None => return Ok(()), // channel closed
+            },
+            _ = heartbeat.tick() => {
+                // Re-send last_activity to detect a dead IPC socket. Idempotent on
+                // Discord's side — same data means no UI change.
+                if let Some((track, artwork_url, started_at)) = last_activity.clone() {
+                    let client_hb = client.clone();
+                    let hb_result = tokio::task::spawn_blocking(move || {
+                        let activity = build_activity(&track, artwork_url.as_deref(), started_at);
+                        if let Ok(mut c) = client_hb.lock() {
+                            c.set_activity(activity)
+                        } else {
+                            Ok(())
+                        }
+                    })
+                    .await
+                    .unwrap_or(Ok(()));
+                    if let Err(e) = hb_result {
+                        tracing::error!("Discord heartbeat failed, triggering reconnect: {e}");
+                        return Err(e.into());
+                    }
+                }
+                continue;
+            }
+        };
+
         match cmd {
             DiscordCommand::SetActivity {
                 track,
@@ -84,31 +159,39 @@ async fn connect_and_run(
                 // Update last_activity state.
                 *last_activity = Some((track.clone(), artwork_url.clone(), started_at));
                 let client = client.clone();
-                tokio::task::spawn_blocking(move || {
+                let ipc_result = tokio::task::spawn_blocking(move || {
                     // build_activity borrows from track/artwork_url, so we call it
                     // inside this closure where those values are owned and alive.
                     let activity = build_activity(&track, artwork_url.as_deref(), started_at);
                     if let Ok(mut c) = client.lock() {
-                        if let Err(e) = c.set_activity(activity) {
-                            tracing::warn!("failed to set Discord activity: {e}");
-                        }
+                        c.set_activity(activity)
+                    } else {
+                        Ok(())
                     }
                 })
                 .await
-                .ok();
+                .unwrap_or(Ok(()));
+                if let Err(e) = ipc_result {
+                    tracing::error!("Discord IPC write failed, triggering reconnect: {e}");
+                    return Err(e.into());
+                }
             }
             DiscordCommand::ClearActivity => {
                 *last_activity = None;
                 let client = client.clone();
-                tokio::task::spawn_blocking(move || {
+                let ipc_result = tokio::task::spawn_blocking(move || {
                     if let Ok(mut c) = client.lock() {
-                        if let Err(e) = c.clear_activity() {
-                            tracing::warn!("failed to clear Discord activity: {e}");
-                        }
+                        c.clear_activity()
+                    } else {
+                        Ok(())
                     }
                 })
                 .await
-                .ok();
+                .unwrap_or(Ok(()));
+                if let Err(e) = ipc_result {
+                    tracing::error!("Discord IPC write failed, triggering reconnect: {e}");
+                    return Err(e.into());
+                }
             }
             DiscordCommand::Shutdown => {
                 let client = client.clone();
