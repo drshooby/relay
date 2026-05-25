@@ -33,3 +33,17 @@ Prerequisites: macOS, Apple Music, Xcode CLI tools (`swiftc`).
 - [ ] "Relay: Idle" shows when nothing playing
 - [ ] "Relay: Disabled" shows when toggle is off
 - [ ] "Relay: media access unavailable" shows on helper error
+
+## End-to-end
+
+Prerequisites: macOS, Apple Music open, Discord running, app built with `cargo build`.
+
+- [ ] Launch app: `./target/debug/relay`
+- [ ] Tray icon appears in menu bar
+- [ ] Play a track in Apple Music → Discord profile shows **"Listening to"** with artwork after ~1.5s
+- [ ] Pause → Discord status clears
+- [ ] Skip tracks rapidly → only final track shown (debounce works)
+- [ ] Toggle **Enabled** off via menu → Discord clears, events stop
+- [ ] Toggle **Enabled** on → resumes
+- [ ] Kill helper: `pkill relay-helper` → tray shows "Relay: media access unavailable", no restart loop
+- [ ] Quit Discord, wait 5s, reopen → app reconnects and re-publishes active track
