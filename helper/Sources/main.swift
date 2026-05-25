@@ -13,8 +13,70 @@ func emit(_ event: [String: String]) {
     }
 }
 
+/// Minimum elapsed-time delta (seconds) before emitting position_changed.
+/// Must match `POSITION_CHANGE_THRESHOLD_SECS` in `src/constants.rs`.
+let positionChangeThresholdSecs = 3
+
 // Track last emitted title to suppress duplicate track_changed events
 var lastEmittedTitle: String? = nil
+var lastReportedElapsedSecs: Int? = nil
+
+func elapsedString(from info: [String: Any]?) -> String? {
+    guard let elapsed = info?[MPNowPlayingInfoPropertyElapsedPlaybackTime] as? NSNumber else {
+        return nil
+    }
+    let secs = elapsed.doubleValue.rounded()
+    guard secs >= 0 else { return nil }
+    return String(Int(secs))
+}
+
+func durationString(from info: [String: Any]?) -> String? {
+    guard let duration = info?[MPMediaItemPropertyPlaybackDuration] as? NSNumber else {
+        return nil
+    }
+    let secs = duration.doubleValue.rounded()
+    guard secs > 0 else { return nil }
+    return String(Int(secs))
+}
+
+func resetElapsedTracking() {
+    lastReportedElapsedSecs = nil
+}
+
+func maybeEmitPositionChanged(newElapsedSecs: Int, source: String) {
+    guard let last = lastReportedElapsedSecs else {
+        lastReportedElapsedSecs = newElapsedSecs
+        return
+    }
+    if abs(newElapsedSecs - last) >= positionChangeThresholdSecs {
+        lastReportedElapsedSecs = newElapsedSecs
+        emit(["event": "position_changed", "elapsed": String(newElapsedSecs)])
+        log("\(source): position_changed elapsed=\(newElapsedSecs)")
+    }
+}
+
+func emitTrackChanged(
+    title: String,
+    artist: String,
+    album: String,
+    elapsed: String?,
+    duration: String?,
+    source: String
+) {
+    lastEmittedTitle = title
+    resetElapsedTracking()
+    if let elapsed, let parsed = Int(elapsed) {
+        lastReportedElapsedSecs = parsed
+    }
+    var event: [String: String] = ["event": "track_changed"]
+    event["title"] = title
+    if !artist.isEmpty { event["artist"] = artist }
+    if !album.isEmpty { event["album"] = album }
+    if let elapsed { event["elapsed"] = elapsed }
+    if let duration { event["duration"] = duration }
+    emit(event)
+    log("\(source): track_changed: \(title) – \(artist)")
+}
 
 // Handle Apple Music playerInfo distributed notification
 // userInfo keys: "Player State" (Playing/Paused/Stopped), "Name", "Artist", "Album"
@@ -28,26 +90,33 @@ func handlePlayerInfo(_ userInfo: [String: Any]) {
     case "Playing":
         guard !name.isEmpty else {
             lastEmittedTitle = nil
+            resetElapsedTracking()
             emit(["event": "playback_stopped"])
             log("playing but no track name → playback_stopped")
             return
         }
         if name != lastEmittedTitle {
-            lastEmittedTitle = name
-            var event: [String: String] = ["event": "track_changed"]
-            event["title"]  = name
-            if !artist.isEmpty { event["artist"] = artist }
-            if !album.isEmpty  { event["album"]  = album  }
-            emit(event)
-            log("track_changed: \(name) – \(artist)")
+            let nowPlaying = MPNowPlayingInfoCenter.default().nowPlayingInfo
+            let elapsed = elapsedString(from: nowPlaying)
+            let duration = durationString(from: nowPlaying)
+            emitTrackChanged(
+                title: name,
+                artist: artist,
+                album: album,
+                elapsed: elapsed,
+                duration: duration,
+                source: "Music.playerInfo"
+            )
         }
     case "Paused":
         lastEmittedTitle = nil
+        resetElapsedTracking()
         emit(["event": "playback_paused"])
         log("playback_paused")
     default:
         // "Stopped" or any other state
         lastEmittedTitle = nil
+        resetElapsedTracking()
         emit(["event": "playback_stopped"])
         log("playback_stopped (state: \(state))")
     }
@@ -93,32 +162,42 @@ class NowPlayingObserver: NSObject {
             let title  = info?[MPMediaItemPropertyTitle]  as? String ?? ""
             let artist = info?[MPMediaItemPropertyArtist] as? String ?? ""
             let album  = info?[MPMediaItemPropertyAlbumTitle] as? String ?? ""
+            let elapsed = elapsedString(from: info)
+            let duration = durationString(from: info)
 
             guard !title.isEmpty else {
                 lastNowPlayingTitle = nil
+                resetElapsedTracking()
                 emit(["event": "playback_stopped"])
                 log("MPNowPlaying: playing but no title → playback_stopped")
                 return
             }
             if title != lastNowPlayingTitle {
                 lastNowPlayingTitle = title
-                var event: [String: String] = ["event": "track_changed"]
-                event["title"]  = title
-                if !artist.isEmpty { event["artist"] = artist }
-                if !album.isEmpty  { event["album"]  = album  }
-                emit(event)
-                log("MPNowPlaying track_changed: \(title)")
+                emitTrackChanged(
+                    title: title,
+                    artist: artist,
+                    album: album,
+                    elapsed: elapsed,
+                    duration: duration,
+                    source: "MPNowPlaying"
+                )
+            } else if let elapsed, let parsed = Int(elapsed) {
+                maybeEmitPositionChanged(newElapsedSecs: parsed, source: "MPNowPlaying")
             }
         case .paused:
             lastNowPlayingTitle = nil
+            resetElapsedTracking()
             emit(["event": "playback_paused"])
             log("MPNowPlaying: playback_paused")
         case .stopped, .interrupted:
             lastNowPlayingTitle = nil
+            resetElapsedTracking()
             emit(["event": "playback_stopped"])
             log("MPNowPlaying: playback_stopped")
         default:
             lastNowPlayingTitle = nil
+            resetElapsedTracking()
             emit(["event": "playback_stopped"])
             log("MPNowPlaying: playback_stopped (unknown state)")
         }
@@ -141,7 +220,9 @@ func emitCurrentState(observer: NowPlayingObserver, reason: String) {
                 set t to name of current track
                 set a to artist of current track
                 set al to album of current track
-                return "playing" & (ASCII character 31) & t & (ASCII character 31) & a & (ASCII character 31) & al
+                set pos to player position
+                set dur to duration of current track
+                return "playing" & (ASCII character 31) & t & (ASCII character 31) & a & (ASCII character 31) & al & (ASCII character 31) & (pos as text) & (ASCII character 31) & (dur as text)
             else if s is "paused" then
                 return "paused"
             else
@@ -163,25 +244,41 @@ func emitCurrentState(observer: NowPlayingObserver, reason: String) {
     let parts = result.components(separatedBy: "\u{001F}")
     switch parts.first {
     case "playing":
-        guard parts.count == 4 else { return }
+        guard parts.count >= 4 else { return }
         let title = parts[1], artist = parts[2], album = parts[3]
         guard !title.isEmpty else { return }
+        let elapsed: String? = {
+            guard parts.count >= 5 else { return nil }
+            let pos = parts[4].trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !pos.isEmpty, let secs = Double(pos), secs >= 0 else { return nil }
+            return String(Int(secs.rounded()))
+        }()
+        let duration: String? = {
+            guard parts.count >= 6 else { return nil }
+            let dur = parts[5].trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !dur.isEmpty, let secs = Double(dur), secs > 0 else { return nil }
+            return String(Int(secs.rounded()))
+        }()
         lastEmittedTitle = title
         observer.lastNowPlayingTitle = title
-        var event: [String: String] = ["event": "track_changed"]
-        event["title"]  = title
-        if !artist.isEmpty { event["artist"] = artist }
-        if !album.isEmpty  { event["album"]  = album  }
-        emit(event)
-        log("\(reason): track_changed: \(title) – \(artist)")
+        emitTrackChanged(
+            title: title,
+            artist: artist,
+            album: album,
+            elapsed: elapsed,
+            duration: duration,
+            source: reason
+        )
     case "paused":
         lastEmittedTitle = nil
         observer.lastNowPlayingTitle = nil
+        resetElapsedTracking()
         emit(["event": "playback_paused"])
         log("\(reason): playback_paused")
     default: // "stopped" or anything unexpected
         lastEmittedTitle = nil
         observer.lastNowPlayingTitle = nil
+        resetElapsedTracking()
         emit(["event": "playback_stopped"])
         log("\(reason): playback_stopped")
     }

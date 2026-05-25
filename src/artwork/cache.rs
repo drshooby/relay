@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
+use crate::artwork::itunes::TrackLookup;
 use crate::constants::ARTWORK_CACHE_TTL_DAYS;
 
 #[derive(Debug, Error)]
@@ -19,6 +20,10 @@ pub enum CacheError {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CachedArtwork {
     pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_secs: Option<u64>,
     pub cached_at_secs: u64, // Unix timestamp seconds
 }
 
@@ -87,21 +92,38 @@ impl ArtworkCache {
         Ok(())
     }
 
-    /// Look up artwork. Returns None if not cached or if entry is expired (and removes it).
-    pub fn get(&mut self, artist: &str, title: &str) -> Option<String> {
+    /// Look up cached track data. Returns None if not cached or if entry is expired
+    /// (and removes it).
+    pub fn get(&mut self, artist: &str, title: &str) -> Option<TrackLookup> {
         let key = make_key(artist, title);
         if let Some(entry) = self.entries.get(&key) {
             if entry.is_expired() {
                 self.entries.remove(&key);
                 return None;
             }
-            return Some(entry.url.clone());
+            return Some(TrackLookup {
+                artwork_url: if entry.url.is_empty() {
+                    None
+                } else {
+                    Some(entry.url.clone())
+                },
+                track_url: entry.track_url.clone(),
+                duration_secs: entry.duration_secs,
+            });
         }
         None
     }
 
-    /// Store an artwork URL in the cache.
-    pub fn insert(&mut self, artist: &str, title: &str, url: String) {
+    /// Store artwork URL and optional track link in the cache.
+    /// No-op when artwork, track URL, and duration are all absent.
+    pub fn insert(&mut self, artist: &str, title: &str, lookup: TrackLookup) {
+        if lookup.artwork_url.is_none()
+            && lookup.track_url.is_none()
+            && lookup.duration_secs.is_none()
+        {
+            return;
+        }
+        let artwork_url = lookup.artwork_url.unwrap_or_default();
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or(Duration::ZERO)
@@ -109,7 +131,9 @@ impl ArtworkCache {
         self.entries.insert(
             make_key(artist, title),
             CachedArtwork {
-                url,
+                url: artwork_url,
+                track_url: lookup.track_url,
+                duration_secs: lookup.duration_secs,
                 cached_at_secs: now,
             },
         );
@@ -127,10 +151,21 @@ mod tests {
         cache.insert(
             "Queen",
             "Bohemian Rhapsody",
-            "https://example.com/art.jpg".into(),
+            TrackLookup {
+                artwork_url: Some("https://example.com/art.jpg".into()),
+                track_url: Some("https://music.apple.com/track/1".into()),
+                duration_secs: Some(157),
+            },
         );
-        let result = cache.get("Queen", "Bohemian Rhapsody");
-        assert_eq!(result, Some("https://example.com/art.jpg".to_string()));
+        let result = cache.get("Queen", "Bohemian Rhapsody").unwrap();
+        assert_eq!(
+            result.artwork_url.as_deref(),
+            Some("https://example.com/art.jpg")
+        );
+        assert_eq!(
+            result.track_url.as_deref(),
+            Some("https://music.apple.com/track/1")
+        );
     }
 
     #[test]
@@ -146,6 +181,8 @@ mod tests {
             make_key("Queen", "Bohemian Rhapsody"),
             CachedArtwork {
                 url: "https://example.com/art.jpg".into(),
+                track_url: None,
+                duration_secs: None,
                 cached_at_secs: old_timestamp,
             },
         );
@@ -163,12 +200,73 @@ mod tests {
         cache.insert(
             "Queen",
             "Bohemian Rhapsody",
-            "https://example.com/art.jpg".into(),
+            TrackLookup {
+                artwork_url: Some("https://example.com/art.jpg".into()),
+                track_url: Some("https://music.apple.com/track/1".into()),
+                duration_secs: Some(157),
+            },
         );
         cache.save_to_path(&path).unwrap();
 
         let mut loaded = ArtworkCache::load_from_path(&path).unwrap();
-        let result = loaded.get("Queen", "Bohemian Rhapsody");
-        assert_eq!(result, Some("https://example.com/art.jpg".to_string()));
+        let result = loaded.get("Queen", "Bohemian Rhapsody").unwrap();
+        assert_eq!(
+            result.artwork_url.as_deref(),
+            Some("https://example.com/art.jpg")
+        );
+        assert_eq!(
+            result.track_url.as_deref(),
+            Some("https://music.apple.com/track/1")
+        );
+    }
+
+    #[test]
+    fn insert_without_artwork_still_caches_track_url() {
+        let mut cache = ArtworkCache::new();
+        cache.insert(
+            "Artist",
+            "Song",
+            TrackLookup {
+                artwork_url: None,
+                track_url: Some("https://music.apple.com/track/1".into()),
+                duration_secs: Some(200),
+            },
+        );
+        let result = cache.get("Artist", "Song").unwrap();
+        assert!(result.artwork_url.is_none());
+        assert_eq!(
+            result.track_url.as_deref(),
+            Some("https://music.apple.com/track/1")
+        );
+        assert_eq!(result.duration_secs, Some(200));
+    }
+
+    #[test]
+    fn backward_compat_loads_entries_without_track_url() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("artwork_cache.json");
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let legacy = format!(
+            r#"{{
+  "entries": {{
+    "Queen\u0000Bohemian Rhapsody": {{
+      "url": "https://example.com/art.jpg",
+      "cached_at_secs": {now}
+    }}
+  }}
+}}"#
+        );
+        std::fs::write(&path, legacy).unwrap();
+
+        let mut loaded = ArtworkCache::load_from_path(&path).unwrap();
+        let result = loaded.get("Queen", "Bohemian Rhapsody").unwrap();
+        assert_eq!(
+            result.artwork_url.as_deref(),
+            Some("https://example.com/art.jpg")
+        );
+        assert!(result.track_url.is_none());
     }
 }

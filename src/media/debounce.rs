@@ -58,6 +58,8 @@ mod tests {
                 title: "A".into(),
                 artist: "X".into(),
                 album: "Y".into(),
+                elapsed_secs: None,
+                duration_secs: None,
             },
             tx.clone(),
         );
@@ -71,6 +73,8 @@ mod tests {
                 title: "B".into(),
                 artist: "X".into(),
                 album: "Y".into(),
+                elapsed_secs: None,
+                duration_secs: None,
             },
             tx.clone(),
         );

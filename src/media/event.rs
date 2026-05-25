@@ -9,6 +9,22 @@ pub enum MediaEvent {
         artist: String,
         #[serde(default)]
         album: String,
+        #[serde(
+            default,
+            rename = "elapsed",
+            deserialize_with = "deserialize_optional_u64"
+        )]
+        elapsed_secs: Option<u64>,
+        #[serde(
+            default,
+            rename = "duration",
+            deserialize_with = "deserialize_optional_u64"
+        )]
+        duration_secs: Option<u64>,
+    },
+    PositionChanged {
+        #[serde(rename = "elapsed", deserialize_with = "deserialize_u64")]
+        elapsed_secs: u64,
     },
     PlaybackPaused,
     PlaybackStopped,
@@ -34,6 +50,29 @@ impl HelperCommand {
         match self {
             HelperCommand::Refresh => "{\"command\":\"refresh\"}\n",
         }
+    }
+}
+
+fn deserialize_u64<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    s.parse::<u64>().map_err(serde::de::Error::custom)
+}
+
+fn deserialize_optional_u64<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s: Option<String> = Option::deserialize(deserializer)?;
+    match s {
+        Some(value) if value.is_empty() => Ok(None),
+        Some(value) => value
+            .parse::<u64>()
+            .map(Some)
+            .map_err(serde::de::Error::custom),
+        None => Ok(None),
     }
 }
 
@@ -64,8 +103,51 @@ mod tests {
                 title: "T".into(),
                 artist: "A".into(),
                 album: "Al".into(),
+                elapsed_secs: None,
+                duration_secs: None,
             }
         );
+    }
+
+    #[test]
+    fn parses_track_changed_with_elapsed() {
+        let line =
+            r#"{"event":"track_changed","title":"T","artist":"A","album":"Al","elapsed":"127"}"#;
+        let ev = parse_event_line(line).unwrap();
+        assert_eq!(
+            ev,
+            MediaEvent::TrackChanged {
+                title: "T".into(),
+                artist: "A".into(),
+                album: "Al".into(),
+                elapsed_secs: Some(127),
+                duration_secs: None,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_track_changed_with_duration() {
+        let line =
+            r#"{"event":"track_changed","title":"T","artist":"A","album":"Al","duration":"157"}"#;
+        let ev = parse_event_line(line).unwrap();
+        assert_eq!(
+            ev,
+            MediaEvent::TrackChanged {
+                title: "T".into(),
+                artist: "A".into(),
+                album: "Al".into(),
+                elapsed_secs: None,
+                duration_secs: Some(157),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_position_changed_event() {
+        let line = r#"{"event":"position_changed","elapsed":"240"}"#;
+        let ev = parse_event_line(line).unwrap();
+        assert_eq!(ev, MediaEvent::PositionChanged { elapsed_secs: 240 });
     }
 
     #[test]
@@ -77,6 +159,13 @@ mod tests {
     #[test]
     fn unknown_event_variant_returns_none() {
         let line = r#"{"event":"unknown_future_event","data":"x"}"#;
+        let result = parse_event_line(line);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn invalid_elapsed_on_position_changed_returns_none() {
+        let line = r#"{"event":"position_changed","elapsed":"not-a-number"}"#;
         let result = parse_event_line(line);
         assert!(result.is_none());
     }

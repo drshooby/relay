@@ -20,6 +20,16 @@ pub const ITUNES_SEARCH_LIMIT: u32 = 5;
 pub const ITUNES_ARTWORK_SIZE_SMALL: &str = "100x100";
 pub const ITUNES_ARTWORK_SIZE_LARGE: &str = "600x600";
 pub const HELPER_BINARY_NAME: &str = "relay-helper";
+pub const DISCORD_BUTTON_LISTEN_LABEL: &str = "Listen to this song";
+/// Shown in the profile card header as "Listening to {name}" (overrides the Relay app name).
+pub const DISCORD_ACTIVITY_NAME: &str = "Apple Music";
+/// Rich Presence art asset key for the Relay badge on album art (upload assets/icons/relay-discord.png in Discord Developer Portal → Rich Presence → Art Assets).
+pub const DISCORD_ASSET_RELAY_BADGE: &str = "relay-discord";
+pub const DISCORD_ASSET_RELAY_BADGE_TEXT: &str = "Relay";
+/// Fallback large image when iTunes artwork is unavailable (upload separately in Developer Portal if not shared with DISCORD_ASSET_RELAY_BADGE).
+pub const DISCORD_ASSET_DEFAULT_ART: &str = "relay_default";
+/// Minimum elapsed-time delta (seconds) before the helper emits position_changed.
+pub const POSITION_CHANGE_THRESHOLD_SECS: u64 = 3;
 
 pub const TRAY_ICON_RELAY: &[u8] = include_bytes!("../assets/icons/relay.png");
 /// Alpha multiplier for the error-state tray icon (0–255). Template icons use alpha as the mask,

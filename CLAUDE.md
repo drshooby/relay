@@ -41,8 +41,10 @@ Bidirectional newline-delimited JSON. All fields are strings — no numbers, boo
 |---|---|---|
 | `event` | string | always |
 | `title` / `artist` / `album` | string | `track_changed` only |
+| `elapsed` | string | `track_changed` (when position known), `position_changed` |
+| `duration` | string | `track_changed` (when track length known) |
 
-Valid `event` values: `track_changed`, `playback_paused`, `playback_stopped`.
+Valid `event` values: `track_changed`, `position_changed`, `playback_paused`, `playback_stopped`.
 
 - Unrecognised `event` → silently ignore (forward compat)
 - Malformed JSON → log warning, skip line, never crash
