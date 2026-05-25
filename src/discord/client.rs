@@ -3,6 +3,7 @@ use tokio::sync::mpsc;
 
 use crate::constants::DISCORD_CLIENT_ID;
 use crate::discord::activity::{build_activity, TrackInfo};
+use crate::discord::reconnect::{initial_backoff_ms, next_backoff_ms};
 
 #[derive(Debug)]
 pub enum DiscordCommand {
@@ -16,24 +17,29 @@ pub enum DiscordCommand {
 }
 
 /// Run the Discord RPC client task.
-///
-/// Receives commands via `cmd_rx`. Blocking IPC calls are wrapped in
-/// `tokio::task::spawn_blocking` to avoid blocking the async runtime.
-///
-/// Task 9 will extend this with reconnect/backoff logic.
+/// Reconnects with exponential backoff on failure.
+/// The last known activity is re-published after reconnect.
 pub async fn run_discord_client(mut cmd_rx: mpsc::Receiver<DiscordCommand>) {
-    match connect_and_run(&mut cmd_rx).await {
-        Ok(()) => {}
-        Err(e) => {
-            tracing::error!("Discord RPC error: {e}");
-            // Task 9 will add reconnect/backoff here
+    let mut backoff_ms = initial_backoff_ms();
+    let mut last_activity: Option<(TrackInfo, Option<String>, i64)> = None;
+
+    loop {
+        match connect_and_run(&mut cmd_rx, &mut last_activity).await {
+            Ok(()) => break, // clean shutdown (Shutdown command received)
+            Err(e) => {
+                tracing::error!("Discord RPC disconnected: {e}");
+                tracing::info!("reconnecting in {backoff_ms}ms");
+                tokio::time::sleep(tokio::time::Duration::from_millis(backoff_ms)).await;
+                backoff_ms = next_backoff_ms(backoff_ms);
+            }
         }
     }
 }
 
 async fn connect_and_run(
     cmd_rx: &mut mpsc::Receiver<DiscordCommand>,
-) -> Result<(), discord_rich_presence::error::Error> {
+    last_activity: &mut Option<(TrackInfo, Option<String>, i64)>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Connect inside spawn_blocking — connect() is a blocking IPC call.
     // DiscordIpcClient::new() is infallible; only connect() can fail.
     let client = tokio::task::spawn_blocking(|| {
@@ -53,6 +59,21 @@ async fn connect_and_run(
 
     tracing::info!("Discord RPC connected");
 
+    // Re-publish last known activity after reconnect.
+    if let Some((track, artwork_url, started_at)) = last_activity.clone() {
+        let client = client.clone();
+        tokio::task::spawn_blocking(move || {
+            let activity = build_activity(&track, artwork_url.as_deref(), started_at);
+            if let Ok(mut c) = client.lock() {
+                if let Err(e) = c.set_activity(activity) {
+                    tracing::warn!("failed to re-publish Discord activity after reconnect: {e}");
+                }
+            }
+        })
+        .await
+        .ok();
+    }
+
     while let Some(cmd) = cmd_rx.recv().await {
         match cmd {
             DiscordCommand::SetActivity {
@@ -60,6 +81,8 @@ async fn connect_and_run(
                 artwork_url,
                 started_at,
             } => {
+                // Update last_activity state.
+                *last_activity = Some((track.clone(), artwork_url.clone(), started_at));
                 let client = client.clone();
                 tokio::task::spawn_blocking(move || {
                     // build_activity borrows from track/artwork_url, so we call it
@@ -75,6 +98,7 @@ async fn connect_and_run(
                 .ok();
             }
             DiscordCommand::ClearActivity => {
+                *last_activity = None;
                 let client = client.clone();
                 tokio::task::spawn_blocking(move || {
                     if let Ok(mut c) = client.lock() {
