@@ -2,6 +2,10 @@
 
 A macOS menu bar app that shows your Apple Music activity on Discord as "Listening to". No backend, no telemetry, no accounts — runs entirely on your machine.
 
+<p align="center">
+  <img src="./assets/icons/relay.png" alt="relay logo">
+</p>
+
 ## What it does
 
 - Watches Apple Music playback via a bundled Swift helper
@@ -55,6 +59,8 @@ See [TESTING.md](TESTING.md) for step-by-step testing instructions for the Swift
 - Requires Discord to be running for Rich Presence to work
 - Apple Music must be granted media access (macOS will prompt)
 - No data leaves your machine
+
+> **NOTE:** App still in development, expect bugs here and there!
 
 ## License
 
