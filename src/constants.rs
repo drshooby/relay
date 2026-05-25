@@ -21,6 +21,13 @@ pub const ITUNES_ARTWORK_SIZE_SMALL: &str = "100x100";
 pub const ITUNES_ARTWORK_SIZE_LARGE: &str = "600x600";
 pub const HELPER_BINARY_NAME: &str = "relay-helper";
 
+pub const TRAY_ICON_RELAY: &[u8] = include_bytes!("../assets/icons/relay.png");
+pub const TRAY_ICON_RELAY_DISABLED: &[u8] = include_bytes!("../assets/icons/relay-disabled.png");
+pub const TRAY_ICON_RELAY_ERROR: &[u8] = include_bytes!("../assets/icons/relay-error.png");
+
+pub const TRAY_ERROR_HELPER_MESSAGE: &str = "media access unavailable";
+pub const TRAY_ERROR_DISCORD_MESSAGE: &str = "discord unavailable";
+
 #[cfg(test)]
 mod tests {
     use super::*;

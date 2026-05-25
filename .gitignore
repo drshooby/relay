@@ -24,3 +24,5 @@ target
 .worktrees/
 
 helper/.build/
+
+.DS_Store

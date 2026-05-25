@@ -27,12 +27,14 @@ Prerequisites: macOS, Apple Music, Xcode CLI tools (`swiftc`).
 
 ## Tray
 
-- [ ] App launches, icon appears in menu bar
-- [ ] Menu opens on click
+- [ ] App launches, **visible** menu bar icon (template glyph) in light and dark menu bar
+- [ ] **No Dock icon** while running (`cargo run` uses accessory activation policy)
+- [ ] Menu opens on click; tooltip shows "Relay"
 - [ ] "Now Playing: ..." shows correct track info when playing
 - [ ] "Relay: Idle" shows when nothing playing
-- [ ] "Relay: Disabled" shows when toggle is off
-- [ ] "Relay: media access unavailable" shows on helper error
+- [ ] Toggle **Enabled** off → dimmed icon + "Relay: Disabled"
+- [ ] "Relay: media access unavailable" on helper error + greyed **details** line (e.g. exit code)
+- [ ] Quit Discord while enabled → error icon + "Relay: discord unavailable" + detail line; reopen Discord → icon returns to normal
 
 ## End-to-end
 
@@ -45,5 +47,5 @@ Prerequisites: macOS, Apple Music open, Discord running, app built with `cargo b
 - [ ] Skip tracks rapidly → only final track shown (debounce works)
 - [ ] Toggle **Enabled** off via menu → Discord clears, events stop
 - [ ] Toggle **Enabled** on → resumes
-- [ ] Kill helper: `pkill relay-helper` → tray shows "Relay: media access unavailable", no restart loop
+- [ ] Kill helper: `pkill relay-helper` → error icon, status + details lines, no restart loop
 - [ ] Quit Discord, wait 5s, reopen → app reconnects and re-publishes active track
