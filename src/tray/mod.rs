@@ -1,3 +1,5 @@
+use crate::media::event::HelperStatus;
+
 /// State of the tray icon and menu label.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TrayState {
@@ -28,6 +30,23 @@ impl TrayState {
     pub fn from_helper_failure(message: String) -> Self {
         TrayState::Error { message }
     }
+
+    /// Convert a HelperStatus to a TrayState (for graceful degradation wiring).
+    pub fn from_helper_status(status: &HelperStatus) -> Option<Self> {
+        match status {
+            HelperStatus::Running => None,
+            HelperStatus::Exited { code } => {
+                let msg = match code {
+                    Some(c) => format!("media access unavailable (exit {})", c),
+                    None => "media access unavailable".to_string(),
+                };
+                Some(TrayState::Error { message: msg })
+            }
+            HelperStatus::IoError => Some(TrayState::Error {
+                message: "media access unavailable".to_string(),
+            }),
+        }
+    }
 }
 
 /// Events emitted from tray UI to the Tokio pipeline.
@@ -42,6 +61,20 @@ pub mod event_loop; // Task 12 will implement this
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn from_helper_status_exited_gives_error() {
+        let status = HelperStatus::Exited { code: Some(1) };
+        let state = TrayState::from_helper_status(&status).unwrap();
+        assert!(matches!(state, TrayState::Error { .. }));
+        assert!(state.label().contains("media access unavailable"));
+    }
+
+    #[test]
+    fn from_helper_status_running_gives_none() {
+        let result = TrayState::from_helper_status(&HelperStatus::Running);
+        assert!(result.is_none());
+    }
 
     #[test]
     fn label_playing() {
