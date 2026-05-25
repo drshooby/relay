@@ -42,6 +42,7 @@ func handlePlayerInfo(_ userInfo: [String: Any]) {
             log("track_changed: \(name) – \(artist)")
         }
     case "Paused":
+        lastEmittedTitle = nil
         emit(["event": "playback_paused"])
         log("playback_paused")
     default:
@@ -109,6 +110,7 @@ class NowPlayingObserver: NSObject {
                 log("MPNowPlaying track_changed: \(title)")
             }
         case .paused:
+            lastNowPlayingTitle = nil
             emit(["event": "playback_paused"])
             log("MPNowPlaying: playback_paused")
         case .stopped, .interrupted:
