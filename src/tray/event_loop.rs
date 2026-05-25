@@ -172,7 +172,7 @@ impl ApplicationHandler<UserEvent> for RelayApp {
 
         // Rate-limit polling to ~60 fps instead of spinning at 100 % CPU.
         event_loop.set_control_flow(ControlFlow::WaitUntil(
-            Instant::now() + Duration::from_millis(16),
+            Instant::now() + Duration::from_millis(crate::constants::TRAY_POLL_INTERVAL_MS),
         ));
     }
 }

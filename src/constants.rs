@@ -1,5 +1,7 @@
 pub const DISCORD_CLIENT_ID: &str = "1508293679427616768";
 pub const TRACK_DEBOUNCE_MS: u64 = 1500;
+pub const CHANNEL_BUFFER_SIZE: usize = 32;
+pub const TRAY_POLL_INTERVAL_MS: u64 = 16;
 pub const ARTWORK_CACHE_TTL_DAYS: u64 = 30;
 pub const DISCORD_RETRY_BASE_MS: u64 = 1000;
 pub const DISCORD_RETRY_MAX_MS: u64 = 30_000;

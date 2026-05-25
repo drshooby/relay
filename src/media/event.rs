@@ -5,7 +5,9 @@ use serde::Deserialize;
 pub enum MediaEvent {
     TrackChanged {
         title: String,
+        #[serde(default)]
         artist: String,
+        #[serde(default)]
         album: String,
     },
     PlaybackPaused,

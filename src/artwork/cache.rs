@@ -40,7 +40,7 @@ fn make_key(artist: &str, title: &str) -> String {
     format!("{}\x00{}", artist, title)
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize, Clone)]
 pub struct ArtworkCache {
     entries: HashMap<String, CachedArtwork>,
 }
