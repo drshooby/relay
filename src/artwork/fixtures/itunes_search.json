@@ -1,0 +1,15 @@
+{
+  "resultCount": 2,
+  "results": [
+    {
+      "trackName": "Bohemian Rhapsody",
+      "artistName": "Queen",
+      "artworkUrl100": "https://is1-ssl.mzstatic.com/image/thumb/Music115/v4/ab/cd/ef/abcdef-cover/100x100bb.jpg"
+    },
+    {
+      "trackName": "Bohemian Rhapsody (Live)",
+      "artistName": "Queen",
+      "artworkUrl100": "https://is1-ssl.mzstatic.com/image/thumb/Music115/v4/12/34/56/123456-cover/100x100bb.jpg"
+    }
+  ]
+}
