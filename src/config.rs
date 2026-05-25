@@ -56,7 +56,8 @@ pub fn save_to_dir(config: &Config, dir: &Path) -> Result<(), ConfigError> {
 /// Loads config from disk. If file missing, returns Config::default() without error.
 pub fn load() -> Result<Config, ConfigError> {
     let path = config_path()?;
-    load_from_dir(path.parent().unwrap_or(Path::new(".")))
+    let dir = path.parent().ok_or(ConfigError::NoAppDir)?;
+    load_from_dir(dir)
 }
 
 /// Saves config to disk. Creates parent directories if needed.
