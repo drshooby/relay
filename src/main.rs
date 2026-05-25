@@ -183,8 +183,10 @@ fn run_event_loop(
 ) -> anyhow::Result<()> {
     use winit::event_loop::ControlFlow;
 
-    // Poll so that about_to_wait is called frequently (needed to drain tray/menu events).
-    event_loop.set_control_flow(ControlFlow::Poll);
+    // WaitUntil so about_to_wait is called at ~60 fps without busy-spinning.
+    event_loop.set_control_flow(ControlFlow::WaitUntil(
+        std::time::Instant::now() + std::time::Duration::from_millis(16),
+    ));
 
     let mut app = RelayApp::new(app_cmd_tx);
 

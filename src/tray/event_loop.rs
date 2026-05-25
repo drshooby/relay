@@ -7,10 +7,11 @@ use tray_icon::{
     menu::{CheckMenuItem, Menu, MenuItem},
     TrayIcon, TrayIconBuilder,
 };
+use std::time::{Duration, Instant};
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
-    event_loop::{ActiveEventLoop, EventLoop},
+    event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
 };
 
 use crate::tray::TrayState;
@@ -155,6 +156,7 @@ impl ApplicationHandler<UserEvent> for RelayApp {
 
     /// Called each time the event loop is about to block — poll tray/menu channel events here
     /// because tray-icon 0.19 does not integrate directly with winit's wakeup mechanism.
+    /// We reschedule a ~16 ms wakeup (~60 fps) to avoid busy-spinning at 100 % CPU.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         // Drain any pending tray icon events (left-click; menu opens automatically).
         while tray_icon::TrayIconEvent::receiver().try_recv().is_ok() {}
@@ -167,5 +169,10 @@ impl ApplicationHandler<UserEvent> for RelayApp {
                 event_loop.exit();
             }
         }
+
+        // Rate-limit polling to ~60 fps instead of spinning at 100 % CPU.
+        event_loop.set_control_flow(ControlFlow::WaitUntil(
+            Instant::now() + Duration::from_millis(16),
+        ));
     }
 }
