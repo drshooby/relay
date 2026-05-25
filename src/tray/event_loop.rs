@@ -3,11 +3,11 @@
 // the event loop has started running).
 // State updates arrive via EventLoopProxy<UserEvent> from the Tokio background thread.
 
+use std::time::{Duration, Instant};
 use tray_icon::{
     menu::{CheckMenuItem, Menu, MenuItem},
     TrayIcon, TrayIconBuilder,
 };
-use std::time::{Duration, Instant};
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
