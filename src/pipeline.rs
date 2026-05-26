@@ -404,7 +404,6 @@ pub async fn run_pipeline(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::constants::TRAY_PERMISSION_DENIED_DETAIL;
     use crate::tray::icons::TrayIconVariant;
     use crate::tray::{DiscordHealth, HelperHealth, TrayStatus};
