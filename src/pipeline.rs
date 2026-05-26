@@ -232,6 +232,9 @@ pub async fn run_pipeline(
                         active_track = None;
                         debouncer.submit(event, debounced_tx.clone());
                     }
+                    MediaEvent::PermissionDenied => {
+                        // TODO(task6): route to TrayStatus
+                    }
                 }
             }
 
@@ -338,6 +341,10 @@ pub async fn run_pipeline(
 
                     MediaEvent::PositionChanged { .. } => {
                         // Position updates are handled on the raw event path.
+                    }
+
+                    MediaEvent::PermissionDenied => {
+                        // Already handled on raw event path.
                     }
                 }
             }

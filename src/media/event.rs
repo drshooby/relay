@@ -28,6 +28,7 @@ pub enum MediaEvent {
     },
     PlaybackPaused,
     PlaybackStopped,
+    PermissionDenied,
 }
 
 #[derive(Debug)]
@@ -168,5 +169,12 @@ mod tests {
         let line = r#"{"event":"position_changed","elapsed":"not-a-number"}"#;
         let result = parse_event_line(line);
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn parses_permission_denied_event() {
+        let line = r#"{"event":"permission_denied"}"#;
+        let ev = parse_event_line(line).unwrap();
+        assert_eq!(ev, MediaEvent::PermissionDenied);
     }
 }
