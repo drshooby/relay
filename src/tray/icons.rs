@@ -4,7 +4,7 @@ use thiserror::Error;
 use tray_icon::Icon;
 
 use crate::constants::{TRAY_ICON_ERROR_ALPHA, TRAY_ICON_RELAY};
-use crate::tray::TrayState;
+use crate::tray::TrayStatus;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayIconVariant {
@@ -87,7 +87,7 @@ fn icons() -> &'static TrayIcons {
     TRAY_ICONS.get_or_init(|| load_icons().expect("embedded relay.png must decode at startup"))
 }
 
-impl TrayState {
+impl TrayStatus {
     pub fn icon(&self) -> Icon {
         let set = icons();
         match self.icon_variant() {
