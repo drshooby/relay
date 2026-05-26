@@ -47,6 +47,14 @@ pub fn config_path() -> Result<PathBuf, ConfigError> {
     Ok(app_dir.join("relay").join("config.toml"))
 }
 
+/// Returns the application data directory: ~/Library/Application Support/relay
+pub fn data_dir() -> Result<PathBuf, ConfigError> {
+    let path = config_path()?;
+    path.parent()
+        .map(|p| p.to_owned())
+        .ok_or(ConfigError::NoAppDir)
+}
+
 /// Test-only: load from custom directory
 pub fn load_from_dir(dir: &Path) -> Result<Config, ConfigError> {
     let config_file = dir.join("config.toml");
