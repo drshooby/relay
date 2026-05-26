@@ -16,6 +16,7 @@ struct CachedActivity {
     track_url: Option<String>,
     started_at: i64,
     duration_secs: Option<u64>,
+    paused: bool,
 }
 
 impl CachedActivity {
@@ -26,6 +27,7 @@ impl CachedActivity {
             self.track_url.as_deref(),
             self.started_at,
             self.duration_secs,
+            self.paused,
         )
     }
 }
@@ -38,6 +40,12 @@ pub enum DiscordCommand {
         track_url: Option<String>,
         started_at: i64,
         duration_secs: Option<u64>,
+    },
+    /// Set a paused-state activity (no timestamps). All other fields are preserved.
+    SetPausedActivity {
+        track: TrackInfo,
+        artwork_url: Option<String>,
+        track_url: Option<String>,
     },
     ClearActivity,
     Shutdown,
@@ -217,6 +225,37 @@ async fn connect_and_run(
                     track_url: track_url.clone(),
                     started_at,
                     duration_secs,
+                    paused: false,
+                };
+                *last_activity = Some(cached.clone());
+                let client = client.clone();
+                let ipc_result = tokio::task::spawn_blocking(move || {
+                    let activity = cached.build();
+                    if let Ok(mut c) = client.lock() {
+                        c.set_activity(activity)
+                    } else {
+                        Ok(())
+                    }
+                })
+                .await
+                .unwrap_or(Ok(()));
+                if let Err(e) = ipc_result {
+                    tracing::error!("Discord IPC write failed, triggering reconnect: {e}");
+                    return Err(e.into());
+                }
+            }
+            DiscordCommand::SetPausedActivity {
+                track,
+                artwork_url,
+                track_url,
+            } => {
+                let cached = CachedActivity {
+                    track: track.clone(),
+                    artwork_url: artwork_url.clone(),
+                    track_url: track_url.clone(),
+                    started_at: 0,
+                    duration_secs: None,
+                    paused: true,
                 };
                 *last_activity = Some(cached.clone());
                 let client = client.clone();
