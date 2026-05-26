@@ -30,6 +30,15 @@ pub const DISCORD_ASSET_RELAY_BADGE_TEXT: &str = "relay";
 /// Minimum elapsed-time delta (seconds) before the helper emits position_changed.
 pub const POSITION_CHANGE_THRESHOLD_SECS: u64 = 3;
 
+/// Shown in the Discord card details line when `show_title` is disabled.
+pub const DISCORD_PRIVATE_TITLE: &str = "Listening to music";
+
+pub const TRAY_DISPLAY_SUBMENU_LABEL: &str = "Display";
+pub const TRAY_DISPLAY_TITLE_LABEL: &str = "Show Title";
+pub const TRAY_DISPLAY_ARTIST_LABEL: &str = "Show Artist";
+pub const TRAY_DISPLAY_ALBUM_LABEL: &str = "Show Album";
+pub const TRAY_DISPLAY_ARTWORK_LABEL: &str = "Show Artwork";
+
 pub const TRAY_ICON_RELAY: &[u8] = include_bytes!("../assets/icons/relay.png");
 /// Alpha multiplier for the error-state tray icon (0–255). Template icons use alpha as the mask,
 /// so dimming reads as grayed out in the menu bar.

@@ -1,7 +1,11 @@
+use std::sync::Arc;
+
+use tokio::sync::RwLock;
 use winit::event_loop::EventLoopProxy;
 
 use crate::artwork::cache::ArtworkCache;
 use crate::artwork::itunes::{search_track, TrackLookup};
+use crate::config::{self, Config, DisplayConfig};
 use crate::constants::{
     CHANNEL_BUFFER_SIZE, TRACK_DEBOUNCE_MS, TRAY_ERROR_DISCORD_DISCONNECTED_DETAIL,
     TRAY_ERROR_DISCORD_MESSAGE,
@@ -14,10 +18,20 @@ use crate::media::reader;
 use crate::tray::event_loop::UserEvent;
 use crate::tray::TrayState;
 
+/// Which display field to toggle.
+#[derive(Debug, Clone, Copy)]
+pub enum DisplayField {
+    Title,
+    Artist,
+    Album,
+    Artwork,
+}
+
 /// Commands sent from the main (winit) thread to the Tokio pipeline.
 #[derive(Debug)]
 pub enum AppCommand {
     Quit,
+    SetDisplayField { field: DisplayField, enabled: bool },
 }
 
 /// Cached Discord activity fields reused for position-only updates.
@@ -83,6 +97,7 @@ async fn send_set_activity(
     active: &ActiveTrack,
     elapsed_secs: Option<u64>,
     debounce_ms: u64,
+    display: DisplayConfig,
 ) {
     let started_at = compute_started_at(now_unix_secs(), elapsed_secs, debounce_ms);
     let _ = discord_tx
@@ -92,6 +107,7 @@ async fn send_set_activity(
             track_url: active.track_url.clone(),
             started_at,
             duration_secs: active.duration_secs,
+            display,
         })
         .await;
 }
@@ -99,6 +115,7 @@ async fn send_set_activity(
 pub async fn run_pipeline(
     proxy: EventLoopProxy<UserEvent>,
     mut app_cmd_rx: tokio::sync::mpsc::Receiver<AppCommand>,
+    cfg: Arc<RwLock<Config>>,
 ) {
     use tokio::sync::mpsc;
 
@@ -186,11 +203,13 @@ pub async fn run_pipeline(
                                 // Skip position updates while paused — adding timestamps to
                                 // a paused card would incorrectly re-enable the progress bar.
                                 if !active.paused {
+                                    let display = cfg.read().await.display.clone();
                                     send_set_activity(
                                         &discord_tx,
                                         active,
                                         Some(elapsed_secs),
                                         0,
+                                        display,
                                     )
                                     .await;
                                 }
@@ -279,11 +298,13 @@ pub async fn run_pipeline(
                             paused: false,
                         };
                         active_track = Some(active.clone());
+                        let display = cfg.read().await.display.clone();
                         send_set_activity(
                             &discord_tx,
                             &active,
                             elapsed_secs,
                             TRACK_DEBOUNCE_MS,
+                            display,
                         )
                         .await;
                     }
@@ -291,11 +312,13 @@ pub async fn run_pipeline(
                     MediaEvent::PlaybackPaused => {
                         if let Some(active) = active_track.as_mut() {
                             active.paused = true;
+                            let display = cfg.read().await.display.clone();
                             let _ = discord_tx
                                 .send(DiscordCommand::SetPausedActivity {
                                     track: active.track.clone(),
                                     artwork_url: active.artwork_url.clone(),
                                     track_url: active.track_url.clone(),
+                                    display,
                                 })
                                 .await;
                         } else {
@@ -319,12 +342,60 @@ pub async fn run_pipeline(
                 }
             }
 
-            // App commands from the main thread (quit).
+            // App commands from the main thread (quit / display toggles).
             cmd = app_cmd_rx.recv() => {
                 match cmd {
                     Some(AppCommand::Quit) => {
                         let _ = discord_tx.send(DiscordCommand::Shutdown).await;
                         break;
+                    }
+                    Some(AppCommand::SetDisplayField { field, enabled }) => {
+                        // Mutate the shared config.
+                        {
+                            let mut guard = cfg.write().await;
+                            match field {
+                                DisplayField::Title => guard.display.show_title = enabled,
+                                DisplayField::Artist => guard.display.show_artist = enabled,
+                                DisplayField::Album => guard.display.show_album = enabled,
+                                DisplayField::Artwork => guard.display.show_artwork = enabled,
+                            }
+                        }
+                        tracing::info!(
+                            "display field {:?} set to {enabled}",
+                            field
+                        );
+
+                        // Persist asynchronously — failure is non-fatal.
+                        let snapshot = cfg.read().await.clone();
+                        tokio::task::spawn_blocking(move || {
+                            if let Err(e) = config::save(&snapshot) {
+                                tracing::warn!("failed to persist config after display toggle: {e}");
+                            }
+                        });
+
+                        // Force-republish with the new display snapshot.
+                        let display = cfg.read().await.display.clone();
+                        if let Some(active) = active_track.as_ref() {
+                            if active.paused {
+                                let _ = discord_tx
+                                    .send(DiscordCommand::SetPausedActivity {
+                                        track: active.track.clone(),
+                                        artwork_url: active.artwork_url.clone(),
+                                        track_url: active.track_url.clone(),
+                                        display,
+                                    })
+                                    .await;
+                            } else {
+                                send_set_activity(
+                                    &discord_tx,
+                                    active,
+                                    None,
+                                    0,
+                                    display,
+                                )
+                                .await;
+                            }
+                        }
                     }
                     None => break, // sender dropped — treat as quit
                 }
