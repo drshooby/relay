@@ -28,7 +28,10 @@ impl PlaybackStatus {
         match self {
             PlaybackStatus::Idle => TRAY_PLAYBACK_IDLE_LABEL.to_string(),
             PlaybackStatus::Playing { title, artist } => {
-                format!("{}{} \u{2014} {}", TRAY_PLAYBACK_PLAYING_PREFIX, title, artist)
+                format!(
+                    "{}{} \u{2014} {}",
+                    TRAY_PLAYBACK_PLAYING_PREFIX, title, artist
+                )
             }
             PlaybackStatus::Paused { title, artist } => {
                 format!(
@@ -200,7 +203,10 @@ mod tests {
         let s = HelperHealth::Unavailable {
             detail: "exited with code 1".into(),
         };
-        assert_eq!(s.row_text(), "Helper: Unavailable \u{2014} exited with code 1");
+        assert_eq!(
+            s.row_text(),
+            "Helper: Unavailable \u{2014} exited with code 1"
+        );
     }
 
     #[test]
