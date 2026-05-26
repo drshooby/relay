@@ -27,6 +27,7 @@ struct ActiveTrack {
     artwork_url: Option<String>,
     track_url: Option<String>,
     duration_secs: Option<u64>,
+    paused: bool,
 }
 
 /// Tracks tray-affecting health so we can restore content state after recovery.
@@ -182,13 +183,17 @@ pub async fn run_pipeline(
                     MediaEvent::PositionChanged { .. } => {
                         if let MediaEvent::PositionChanged { elapsed_secs } = event {
                             if let Some(active) = active_track.as_ref() {
-                                send_set_activity(
-                                    &discord_tx,
-                                    active,
-                                    Some(elapsed_secs),
-                                    0,
-                                )
-                                .await;
+                                // Skip position updates while paused — adding timestamps to
+                                // a paused card would incorrectly re-enable the progress bar.
+                                if !active.paused {
+                                    send_set_activity(
+                                        &discord_tx,
+                                        active,
+                                        Some(elapsed_secs),
+                                        0,
+                                    )
+                                    .await;
+                                }
                             }
                         }
                     }
@@ -198,7 +203,13 @@ pub async fn run_pipeline(
                         active_track = None;
                         debouncer.submit(event, debounced_tx.clone());
                     }
-                    MediaEvent::PlaybackPaused | MediaEvent::PlaybackStopped => {
+                    MediaEvent::PlaybackPaused => {
+                        // Do NOT clear active_track here — let the debounced handler
+                        // mutate the paused flag so rapid pause→resume doesn't lose
+                        // track context.
+                        debouncer.submit(event, debounced_tx.clone());
+                    }
+                    MediaEvent::PlaybackStopped => {
                         active_track = None;
                         debouncer.submit(event, debounced_tx.clone());
                     }
@@ -265,6 +276,7 @@ pub async fn run_pipeline(
                             artwork_url: lookup.artwork_url.clone(),
                             track_url: lookup.track_url.clone(),
                             duration_secs: resolved_duration,
+                            paused: false,
                         };
                         active_track = Some(active.clone());
                         send_set_activity(
@@ -276,7 +288,25 @@ pub async fn run_pipeline(
                         .await;
                     }
 
-                    MediaEvent::PlaybackPaused | MediaEvent::PlaybackStopped => {
+                    MediaEvent::PlaybackPaused => {
+                        if let Some(active) = active_track.as_mut() {
+                            active.paused = true;
+                            let _ = discord_tx
+                                .send(DiscordCommand::SetPausedActivity {
+                                    track: active.track.clone(),
+                                    artwork_url: active.artwork_url.clone(),
+                                    track_url: active.track_url.clone(),
+                                })
+                                .await;
+                        } else {
+                            // No active track established yet — safe fallback.
+                            tray_health.set_content(TrayState::Idle);
+                            send_tray(tray_health.resolved());
+                            let _ = discord_tx.send(DiscordCommand::ClearActivity).await;
+                        }
+                    }
+
+                    MediaEvent::PlaybackStopped => {
                         active_track = None;
                         tray_health.set_content(TrayState::Idle);
                         send_tray(tray_health.resolved());
