@@ -49,3 +49,19 @@ Prerequisites: macOS, Apple Music open, Discord running, app built with `cargo b
 - [ ] Kill helper: `pkill relay-helper` → dimmed icon, status + details lines, no restart loop
 - [ ] Quit Discord, wait 5s, reopen → app reconnects and re-publishes active track
 - [ ] **Quit Relay** from menu → app exits cleanly
+
+## Resume position accuracy (#37)
+
+Prerequisites: macOS, Apple Music open, Discord running, second Discord account visible for observation.
+
+- [ ] **#37** — Play a track → scrub to ~1:30 → pause → resume → Discord card on second account shows approximately 1:30 (within ±3 s) and counting forward within 3 s of resume
+- [ ] **#37b** — Play a track from the beginning → pause at some mid-track position (without scrubbing) → resume → Discord card shows the correct mid-track position (not 0:00)
+- [ ] After the above tests, confirm stderr contains `[relay-helper] Music.playerInfo.resume: track_changed` (AppleScript path was used, not the stale MPNowPlayingInfoCenter path)
+
+## Music.app quit / launch detection (#33)
+
+Prerequisites: macOS, Apple Music playing a track, Discord showing active "Listening to" card.
+
+- [ ] **#33** — While a track is playing and Discord shows activity, press ⌘Q in Music.app → Discord activity card clears within ~1 s; stderr contains `[relay-helper] Music.app terminated → playback_stopped`
+- [ ] **#33b** — With stale Discord activity visible (e.g. from a previous session or a force-quit scenario), launch Music.app without playing anything → Discord activity clears; stderr contains `[relay-helper] Music.app launched → playback_stopped (resets stale state)`
+- [ ] After Music.app relaunches and playback begins, Discord shows the new track correctly (NSWorkspace launch event did not break subsequent play detection)
