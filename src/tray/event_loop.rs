@@ -2,9 +2,12 @@
 // the event loop has started running).
 // State updates arrive via EventLoopProxy<UserEvent> from the Tokio background thread.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use tokio::sync::RwLock;
 use tray_icon::{
-    menu::{Menu, MenuItem},
+    menu::{CheckMenuItem, Menu, MenuItem, Submenu},
     TrayIcon, TrayIconBuilder,
 };
 use winit::{
@@ -13,6 +16,12 @@ use winit::{
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
 };
 
+use crate::config::Config;
+use crate::constants::{
+    TRAY_DISPLAY_ALBUM_LABEL, TRAY_DISPLAY_ARTIST_LABEL, TRAY_DISPLAY_ARTWORK_LABEL,
+    TRAY_DISPLAY_SUBMENU_LABEL, TRAY_DISPLAY_TITLE_LABEL,
+};
+use crate::pipeline::DisplayField;
 use crate::tray::icons::{self, TrayIconVariant};
 use crate::tray::TrayState;
 
@@ -44,31 +53,73 @@ pub struct RelayApp {
     /// Command sender for the Tokio pipeline.
     app_cmd_tx: tokio::sync::mpsc::Sender<crate::AppCommand>,
 
+    /// Shared config — used to read initial display state when building the tray.
+    cfg: Arc<RwLock<Config>>,
+
     tray_icon: Option<TrayIcon>,
     status_item: Option<MenuItem>,
     details_item: Option<MenuItem>,
     quit_item: Option<MenuItem>,
     last_icon_variant: Option<TrayIconVariant>,
+
+    // Display submenu toggles.
+    display_title_item: Option<CheckMenuItem>,
+    display_artist_item: Option<CheckMenuItem>,
+    display_album_item: Option<CheckMenuItem>,
+    display_artwork_item: Option<CheckMenuItem>,
 }
 
 impl RelayApp {
-    pub fn new(app_cmd_tx: tokio::sync::mpsc::Sender<crate::AppCommand>) -> Self {
+    pub fn new(
+        app_cmd_tx: tokio::sync::mpsc::Sender<crate::AppCommand>,
+        cfg: Arc<RwLock<Config>>,
+    ) -> Self {
         Self {
             app_cmd_tx,
+            cfg,
             tray_icon: None,
             status_item: None,
             details_item: None,
             quit_item: None,
             last_icon_variant: None,
+            display_title_item: None,
+            display_artist_item: None,
+            display_album_item: None,
+            display_artwork_item: None,
         }
     }
 
     fn build_tray(&mut self) {
+        // Read the current display config (blocking — main thread, pre-loop-start).
+        let display = self.cfg.blocking_read().display.clone();
+
         let status_item = MenuItem::new(TrayState::Idle.label(), true, None);
         let details_item = MenuItem::new("", false, None);
+
+        // Display submenu with 4 checkable toggles.
+        let display_title_item =
+            CheckMenuItem::new(TRAY_DISPLAY_TITLE_LABEL, true, display.show_title, None);
+        let display_artist_item =
+            CheckMenuItem::new(TRAY_DISPLAY_ARTIST_LABEL, true, display.show_artist, None);
+        let display_album_item =
+            CheckMenuItem::new(TRAY_DISPLAY_ALBUM_LABEL, true, display.show_album, None);
+        let display_artwork_item =
+            CheckMenuItem::new(TRAY_DISPLAY_ARTWORK_LABEL, true, display.show_artwork, None);
+        let display_submenu = Submenu::with_items(
+            TRAY_DISPLAY_SUBMENU_LABEL,
+            true,
+            &[
+                &display_title_item,
+                &display_artist_item,
+                &display_album_item,
+                &display_artwork_item,
+            ],
+        )
+        .expect("failed to build display submenu");
+
         let quit_item = MenuItem::new("Quit Relay", true, None);
 
-        let menu = Menu::with_items(&[&status_item, &details_item, &quit_item])
+        let menu = Menu::with_items(&[&status_item, &details_item, &display_submenu, &quit_item])
             .expect("failed to build tray menu");
 
         let icon = icons::default_icon();
@@ -85,6 +136,10 @@ impl RelayApp {
         self.status_item = Some(status_item);
         self.details_item = Some(details_item);
         self.quit_item = Some(quit_item);
+        self.display_title_item = Some(display_title_item);
+        self.display_artist_item = Some(display_artist_item);
+        self.display_album_item = Some(display_album_item);
+        self.display_artwork_item = Some(display_artwork_item);
         self.tray_icon = Some(tray);
         self.last_icon_variant = Some(TrayIconVariant::Normal);
     }
@@ -118,11 +173,33 @@ impl RelayApp {
     }
 
     fn handle_menu_event(&self, event: &tray_icon::menu::MenuEvent) {
-        let quit_id = self.quit_item.as_ref().map(|i| i.id().clone());
-
-        if Some(&event.id) == quit_id.as_ref() {
+        if self.quit_item.as_ref().is_some_and(|i| event.id == i.id()) {
             tracing::info!("quit requested via menu");
             let _ = self.app_cmd_tx.blocking_send(crate::AppCommand::Quit);
+            return;
+        }
+
+        // Display toggle handlers: read the new checked state and forward to pipeline.
+        let display_toggles: &[(Option<&CheckMenuItem>, DisplayField)] = &[
+            (self.display_title_item.as_ref(), DisplayField::Title),
+            (self.display_artist_item.as_ref(), DisplayField::Artist),
+            (self.display_album_item.as_ref(), DisplayField::Album),
+            (self.display_artwork_item.as_ref(), DisplayField::Artwork),
+        ];
+        for (item_opt, field) in display_toggles {
+            if let Some(item) = item_opt {
+                if event.id == item.id() {
+                    let enabled = item.is_checked();
+                    tracing::debug!("display toggle {:?} -> {enabled}", field);
+                    let _ = self
+                        .app_cmd_tx
+                        .blocking_send(crate::AppCommand::SetDisplayField {
+                            field: *field,
+                            enabled,
+                        });
+                    return;
+                }
+            }
         }
     }
 

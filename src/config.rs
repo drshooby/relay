@@ -2,9 +2,32 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
-/// Reserved for future user settings. Not loaded at startup in v1.
-#[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
-pub struct Config {}
+/// Per-field Discord display toggles. Defaults to all enabled.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+#[serde(default)]
+pub struct DisplayConfig {
+    pub show_title: bool,
+    pub show_artist: bool,
+    pub show_album: bool,
+    pub show_artwork: bool,
+}
+
+impl Default for DisplayConfig {
+    fn default() -> Self {
+        Self {
+            show_title: true,
+            show_artist: true,
+            show_album: true,
+            show_artwork: true,
+        }
+    }
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, PartialEq, Clone)]
+pub struct Config {
+    #[serde(default)]
+    pub display: DisplayConfig,
+}
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -87,5 +110,50 @@ mod tests {
         std::fs::write(dir.path().join("config.toml"), "enabled = false\n").unwrap();
         let cfg = load_from_dir(dir.path()).unwrap();
         assert_eq!(cfg, Config::default());
+    }
+
+    #[test]
+    fn load_missing_display_section_uses_defaults() {
+        let dir = tempdir().unwrap();
+        // Config file with no [display] section at all.
+        std::fs::write(dir.path().join("config.toml"), "").unwrap();
+        let cfg = load_from_dir(dir.path()).unwrap();
+        assert_eq!(cfg.display, DisplayConfig::default());
+        assert!(cfg.display.show_title);
+        assert!(cfg.display.show_artist);
+        assert!(cfg.display.show_album);
+        assert!(cfg.display.show_artwork);
+    }
+
+    #[test]
+    fn partial_display_section_uses_field_defaults() {
+        let dir = tempdir().unwrap();
+        // Only override show_artwork; other three should remain true.
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "[display]\nshow_artwork = false\n",
+        )
+        .unwrap();
+        let cfg = load_from_dir(dir.path()).unwrap();
+        assert!(cfg.display.show_title);
+        assert!(cfg.display.show_artist);
+        assert!(cfg.display.show_album);
+        assert!(!cfg.display.show_artwork);
+    }
+
+    #[test]
+    fn round_trip_with_custom_display() {
+        let dir = tempdir().unwrap();
+        let cfg = Config {
+            display: DisplayConfig {
+                show_title: false,
+                show_artist: false,
+                show_album: false,
+                show_artwork: false,
+            },
+        };
+        save_to_dir(&cfg, dir.path()).unwrap();
+        let reloaded = load_from_dir(dir.path()).unwrap();
+        assert_eq!(reloaded, cfg);
     }
 }

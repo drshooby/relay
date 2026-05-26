@@ -2,9 +2,10 @@ use discord_rich_presence::activity::{
     Activity, ActivityType, Assets, Button, StatusDisplayType, Timestamps,
 };
 
+use crate::config::DisplayConfig;
 use crate::constants::{
     DISCORD_ACTIVITY_NAME, DISCORD_ASSET_RELAY_BADGE, DISCORD_ASSET_RELAY_BADGE_TEXT,
-    DISCORD_BUTTON_LISTEN_LABEL,
+    DISCORD_BUTTON_LISTEN_LABEL, DISCORD_PRIVATE_TITLE,
 };
 
 #[derive(Debug, Clone)]
@@ -37,14 +38,15 @@ pub fn compute_ended_at(started_at: i64, duration_secs: Option<u64>) -> Option<i
 
 /// Build a Discord activity payload for a playing or paused track.
 ///
-/// - `details`: track title (primary line).
-/// - `state`: artist name (secondary line).
+/// - `track`: track metadata (title, artist, album).
 /// - `artwork_url`: optional URL for large image (600x600). When `None`, uses
 ///   `DISCORD_ASSET_RELAY_BADGE` as the large image and omits the small overlay.
 /// - `track_url`: optional Apple Music link for the listen button.
 /// - `started_at` / `duration_secs`: used for the progress bar when `paused` is `false`.
 /// - `paused`: when `true`, timestamps are omitted entirely — Discord shows a
 ///   static card with no ticking counter or progress bar.
+/// - `display`: per-field visibility toggles. Defaults (all `true`) reproduce the
+///   pre-#32 behaviour.
 pub fn build_activity(
     track: &TrackInfo,
     artwork_url: Option<&str>,
@@ -52,25 +54,47 @@ pub fn build_activity(
     started_at: i64,
     duration_secs: Option<u64>,
     paused: bool,
+    display: &DisplayConfig,
 ) -> Activity<'static> {
-    let assets = match artwork_url {
+    // Apply display filters.
+    // show_artwork = false: force badge as large image, omit small image.
+    let effective_artwork = if display.show_artwork {
+        artwork_url
+    } else {
+        None
+    };
+
+    let mut assets = match effective_artwork {
         Some(url) => Assets::new()
             .large_image(url.to_owned())
-            .large_text(track.album.clone())
             .small_image(DISCORD_ASSET_RELAY_BADGE.to_owned())
             .small_text(DISCORD_ASSET_RELAY_BADGE_TEXT.to_owned()),
-        None => Assets::new()
-            .large_image(DISCORD_ASSET_RELAY_BADGE.to_owned())
-            .large_text(track.album.clone()),
+        None => Assets::new().large_image(DISCORD_ASSET_RELAY_BADGE.to_owned()),
+    };
+
+    // show_album = false: skip large_text (album tooltip).
+    if display.show_album {
+        assets = assets.large_text(track.album.clone());
+    }
+
+    // show_title = false: replace details with generic privacy label.
+    let details = if display.show_title {
+        track.title.clone()
+    } else {
+        DISCORD_PRIVATE_TITLE.to_owned()
     };
 
     let mut activity = Activity::new()
         .name(DISCORD_ACTIVITY_NAME.to_owned())
-        .details(track.title.clone())
-        .state(track.artist.clone())
+        .details(details)
         .assets(assets)
         .activity_type(ActivityType::Listening)
         .status_display_type(StatusDisplayType::Name);
+
+    // show_artist = false: skip .state() call entirely.
+    if display.show_artist {
+        activity = activity.state(track.artist.clone());
+    }
 
     if !paused {
         let mut timestamps = Timestamps::new().start(started_at);
@@ -93,6 +117,7 @@ pub fn build_activity(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::DisplayConfig;
 
     fn sample_track() -> TrackInfo {
         TrackInfo {
@@ -112,19 +137,36 @@ mod tests {
             1_000_000,
             Some(300),
             false,
+            &DisplayConfig::default(),
         );
     }
 
     #[test]
     fn build_activity_with_no_artwork_does_not_panic() {
         let track = sample_track();
-        let _activity = build_activity(&track, None, None, 1_000_000, None, false);
+        let _activity = build_activity(
+            &track,
+            None,
+            None,
+            1_000_000,
+            None,
+            false,
+            &DisplayConfig::default(),
+        );
     }
 
     #[test]
     fn build_activity_uses_listening_type() {
         let track = sample_track();
-        let activity = build_activity(&track, None, None, 1_000_000, None, false);
+        let activity = build_activity(
+            &track,
+            None,
+            None,
+            1_000_000,
+            None,
+            false,
+            &DisplayConfig::default(),
+        );
         let json = serde_json::to_value(&activity).expect("activity should serialise");
         assert_eq!(
             json.get("type").and_then(|v| v.as_u64()),
@@ -136,7 +178,15 @@ mod tests {
     #[test]
     fn build_activity_details_is_track_title() {
         let track = sample_track();
-        let activity = build_activity(&track, None, None, 1_000_000, None, false);
+        let activity = build_activity(
+            &track,
+            None,
+            None,
+            1_000_000,
+            None,
+            false,
+            &DisplayConfig::default(),
+        );
         let json = serde_json::to_value(&activity).expect("activity should serialise");
         assert_eq!(
             json.get("details").and_then(|v| v.as_str()),
@@ -147,7 +197,15 @@ mod tests {
     #[test]
     fn build_activity_state_is_artist_only() {
         let track = sample_track();
-        let activity = build_activity(&track, None, None, 1_000_000, None, false);
+        let activity = build_activity(
+            &track,
+            None,
+            None,
+            1_000_000,
+            None,
+            false,
+            &DisplayConfig::default(),
+        );
         let json = serde_json::to_value(&activity).expect("activity should serialise");
         assert_eq!(json.get("state").and_then(|v| v.as_str()), Some("Queen"));
     }
@@ -155,7 +213,15 @@ mod tests {
     #[test]
     fn build_activity_includes_progress_bar_timestamps() {
         let track = sample_track();
-        let activity = build_activity(&track, None, None, 1_000, Some(157), false);
+        let activity = build_activity(
+            &track,
+            None,
+            None,
+            1_000,
+            Some(157),
+            false,
+            &DisplayConfig::default(),
+        );
         let json = serde_json::to_value(&activity).expect("activity should serialise");
         let timestamps = json
             .get("timestamps")
@@ -170,7 +236,15 @@ mod tests {
     #[test]
     fn build_activity_omits_end_without_duration() {
         let track = sample_track();
-        let activity = build_activity(&track, None, None, 1_000, None, false);
+        let activity = build_activity(
+            &track,
+            None,
+            None,
+            1_000,
+            None,
+            false,
+            &DisplayConfig::default(),
+        );
         let json = serde_json::to_value(&activity).expect("activity should serialise");
         let timestamps = json
             .get("timestamps")
@@ -192,6 +266,7 @@ mod tests {
             1_000_000,
             None,
             false,
+            &DisplayConfig::default(),
         );
         let json = serde_json::to_value(&activity).expect("activity should serialise");
         let assets = json.get("assets").expect("assets should be present");
@@ -208,7 +283,15 @@ mod tests {
     #[test]
     fn build_activity_uses_apple_music_name() {
         let track = sample_track();
-        let activity = build_activity(&track, None, None, 1_000_000, None, false);
+        let activity = build_activity(
+            &track,
+            None,
+            None,
+            1_000_000,
+            None,
+            false,
+            &DisplayConfig::default(),
+        );
         let json = serde_json::to_value(&activity).expect("activity should serialise");
         assert_eq!(
             json.get("name").and_then(|v| v.as_str()),
@@ -231,6 +314,7 @@ mod tests {
             1_000_000,
             None,
             false,
+            &DisplayConfig::default(),
         );
         let json = serde_json::to_value(&activity).expect("activity should serialise");
         let buttons = json.get("buttons").and_then(|v| v.as_array()).unwrap();
@@ -244,7 +328,15 @@ mod tests {
     #[test]
     fn build_activity_omits_button_when_track_url_absent() {
         let track = sample_track();
-        let activity = build_activity(&track, None, None, 1_000_000, None, false);
+        let activity = build_activity(
+            &track,
+            None,
+            None,
+            1_000_000,
+            None,
+            false,
+            &DisplayConfig::default(),
+        );
         let json = serde_json::to_value(&activity).expect("activity should serialise");
         assert!(json.get("buttons").is_none());
     }
@@ -254,7 +346,15 @@ mod tests {
     #[test]
     fn build_activity_paused_omits_timestamps() {
         let track = sample_track();
-        let activity = build_activity(&track, None, None, 1_000_000, Some(300), true);
+        let activity = build_activity(
+            &track,
+            None,
+            None,
+            1_000_000,
+            Some(300),
+            true,
+            &DisplayConfig::default(),
+        );
         let json = serde_json::to_value(&activity).expect("activity should serialise");
         assert!(
             json.get("timestamps").is_none(),
@@ -272,6 +372,7 @@ mod tests {
             1_000_000,
             Some(300),
             true,
+            &DisplayConfig::default(),
         );
         let json = serde_json::to_value(&activity).expect("activity should serialise");
         assert_eq!(
@@ -298,7 +399,15 @@ mod tests {
     #[test]
     fn build_activity_no_artwork_uses_badge_as_large_and_omits_small() {
         let track = sample_track();
-        let activity = build_activity(&track, None, None, 1_000_000, None, false);
+        let activity = build_activity(
+            &track,
+            None,
+            None,
+            1_000_000,
+            None,
+            false,
+            &DisplayConfig::default(),
+        );
         let json = serde_json::to_value(&activity).expect("activity should serialise");
         let assets = json.get("assets").expect("assets should be present");
         assert_eq!(
@@ -326,6 +435,7 @@ mod tests {
             1_000_000,
             None,
             false,
+            &DisplayConfig::default(),
         );
         let json = serde_json::to_value(&activity).expect("activity should serialise");
         let assets = json.get("assets").expect("assets should be present");
@@ -338,6 +448,134 @@ mod tests {
             assets.get("small_image").and_then(|v| v.as_str()),
             Some(DISCORD_ASSET_RELAY_BADGE),
             "small_image should be relay badge overlay when artwork is present"
+        );
+    }
+
+    // --- #32 display toggle tests ---
+
+    #[test]
+    fn build_activity_show_title_false_uses_private_label() {
+        let track = sample_track();
+        let display = DisplayConfig {
+            show_title: false,
+            ..DisplayConfig::default()
+        };
+        let activity = build_activity(&track, None, None, 1_000_000, None, false, &display);
+        let json = serde_json::to_value(&activity).expect("activity should serialise");
+        assert_eq!(
+            json.get("details").and_then(|v| v.as_str()),
+            Some(DISCORD_PRIVATE_TITLE),
+            "details should be private label when show_title is false"
+        );
+    }
+
+    #[test]
+    fn build_activity_show_artist_false_omits_state() {
+        let track = sample_track();
+        let display = DisplayConfig {
+            show_artist: false,
+            ..DisplayConfig::default()
+        };
+        let activity = build_activity(&track, None, None, 1_000_000, None, false, &display);
+        let json = serde_json::to_value(&activity).expect("activity should serialise");
+        assert!(
+            json.get("state").is_none(),
+            "state field should be absent when show_artist is false"
+        );
+    }
+
+    #[test]
+    fn build_activity_show_album_false_omits_large_text() {
+        let track = sample_track();
+        let display = DisplayConfig {
+            show_album: false,
+            ..DisplayConfig::default()
+        };
+        let activity = build_activity(
+            &track,
+            Some("https://example.com/art.jpg"),
+            None,
+            1_000_000,
+            None,
+            false,
+            &display,
+        );
+        let json = serde_json::to_value(&activity).expect("activity should serialise");
+        let assets = json.get("assets").expect("assets should be present");
+        assert!(
+            assets.get("large_text").is_none(),
+            "large_text should be absent when show_album is false"
+        );
+    }
+
+    #[test]
+    fn build_activity_show_artwork_false_uses_badge_as_large() {
+        let track = sample_track();
+        let display = DisplayConfig {
+            show_artwork: false,
+            ..DisplayConfig::default()
+        };
+        // Pass an artwork URL — it should be ignored when show_artwork is false.
+        let activity = build_activity(
+            &track,
+            Some("https://example.com/art.jpg"),
+            None,
+            1_000_000,
+            None,
+            false,
+            &display,
+        );
+        let json = serde_json::to_value(&activity).expect("activity should serialise");
+        let assets = json.get("assets").expect("assets should be present");
+        assert_eq!(
+            assets.get("large_image").and_then(|v| v.as_str()),
+            Some(DISCORD_ASSET_RELAY_BADGE),
+            "large_image should be badge when show_artwork is false"
+        );
+        assert!(
+            assets.get("small_image").is_none(),
+            "small_image should be absent when show_artwork is false"
+        );
+    }
+
+    #[test]
+    fn build_activity_all_show_false_minimal_card() {
+        let track = sample_track();
+        let display = DisplayConfig {
+            show_title: false,
+            show_artist: false,
+            show_album: false,
+            show_artwork: false,
+        };
+        let activity = build_activity(
+            &track,
+            Some("https://example.com/art.jpg"),
+            None,
+            1_000_000,
+            None,
+            false,
+            &display,
+        );
+        let json = serde_json::to_value(&activity).expect("activity should serialise");
+        assert_eq!(
+            json.get("details").and_then(|v| v.as_str()),
+            Some(DISCORD_PRIVATE_TITLE),
+            "details should be private label"
+        );
+        assert!(json.get("state").is_none(), "state should be absent");
+        let assets = json.get("assets").expect("assets should be present");
+        assert_eq!(
+            assets.get("large_image").and_then(|v| v.as_str()),
+            Some(DISCORD_ASSET_RELAY_BADGE),
+            "large_image should be badge"
+        );
+        assert!(
+            assets.get("large_text").is_none(),
+            "large_text should be absent"
+        );
+        assert!(
+            assets.get("small_image").is_none(),
+            "small_image should be absent"
         );
     }
 

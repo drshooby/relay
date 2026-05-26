@@ -1,6 +1,7 @@
 use discord_rich_presence::{DiscordIpc, DiscordIpcClient};
 use tokio::sync::mpsc;
 
+use crate::config::DisplayConfig;
 use crate::constants::{
     DISCORD_CLIENT_ID, DISCORD_HEARTBEAT_INTERVAL_MS, DISCORD_POST_CONNECT_DELAY_MS,
 };
@@ -17,6 +18,7 @@ struct CachedActivity {
     started_at: i64,
     duration_secs: Option<u64>,
     paused: bool,
+    display: DisplayConfig,
 }
 
 impl CachedActivity {
@@ -28,6 +30,7 @@ impl CachedActivity {
             self.started_at,
             self.duration_secs,
             self.paused,
+            &self.display,
         )
     }
 }
@@ -40,12 +43,14 @@ pub enum DiscordCommand {
         track_url: Option<String>,
         started_at: i64,
         duration_secs: Option<u64>,
+        display: DisplayConfig,
     },
     /// Set a paused-state activity (no timestamps). All other fields are preserved.
     SetPausedActivity {
         track: TrackInfo,
         artwork_url: Option<String>,
         track_url: Option<String>,
+        display: DisplayConfig,
     },
     ClearActivity,
     Shutdown,
@@ -218,6 +223,7 @@ async fn connect_and_run(
                 track_url,
                 started_at,
                 duration_secs,
+                display,
             } => {
                 let cached = CachedActivity {
                     track: track.clone(),
@@ -226,6 +232,7 @@ async fn connect_and_run(
                     started_at,
                     duration_secs,
                     paused: false,
+                    display,
                 };
                 *last_activity = Some(cached.clone());
                 let client = client.clone();
@@ -248,6 +255,7 @@ async fn connect_and_run(
                 track,
                 artwork_url,
                 track_url,
+                display,
             } => {
                 let cached = CachedActivity {
                     track: track.clone(),
@@ -256,6 +264,7 @@ async fn connect_and_run(
                     started_at: 0,
                     duration_secs: None,
                     paused: true,
+                    display,
                 };
                 *last_activity = Some(cached.clone());
                 let client = client.clone();
