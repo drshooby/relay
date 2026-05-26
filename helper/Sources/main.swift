@@ -261,6 +261,12 @@ func emitCurrentState(observer: NowPlayingObserver, reason: String) {
     guard let script = NSAppleScript(source: source) else { return }
     let descriptor = script.executeAndReturnError(&errorDict)
     if let err = errorDict {
+        let errNum = (err[NSAppleScript.errorNumber] as? NSNumber)?.intValue ?? 0
+        if errNum == -1743 {
+            emit(["event": "permission_denied"])
+            log("\(reason): permission_denied (errAEEventNotPermitted)")
+            return
+        }
         log("\(reason): AppleScript query failed: \(err)")
         return
     }

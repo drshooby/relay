@@ -65,3 +65,57 @@ Prerequisites: macOS, Apple Music playing a track, Discord showing active "Liste
 - [ ] **#33** — While a track is playing and Discord shows activity, press ⌘Q in Music.app → Discord activity card clears within ~1 s; stderr contains `[relay-helper] Music.app terminated → playback_stopped`
 - [ ] **#33b** — With stale Discord activity visible (e.g. from a previous session or a force-quit scenario), launch Music.app without playing anything → Discord activity clears; stderr contains `[relay-helper] Music.app launched → playback_stopped (resets stale state)`
 - [ ] After Music.app relaunches and playback begins, Discord shows the new track correctly (NSWorkspace launch event did not break subsequent play detection)
+
+## Status dashboard + onboarding manual checks
+
+Prerequisites: macOS, Apple Music available, Discord running (or available to kill).
+
+### 1. Status rows render
+
+- [ ] Launch `cargo run`, click the tray icon
+- [ ] See "Now Playing: Idle", "Discord: Connected", "Helper: Running" rows in the documented order
+- [ ] Play a track in Apple Music → "Now Playing: &lt;title&gt; — &lt;artist&gt;" updates within ~2s
+- [ ] Pause → "Paused — &lt;title&gt; — &lt;artist&gt;" appears in the playback row
+
+### 2. Silent stdout/stderr
+
+- [ ] Run `cargo run` (no RUST_LOG set) for ~5 s with Apple Music not playing
+- [ ] Confirm zero lines on stdout and stderr
+- [ ] ^C to stop
+
+### 3. Developer logging still works
+
+- [ ] Run `RUST_LOG=info cargo run` for ~5 s
+- [ ] Confirm lifecycle log lines appear (discord connect, helper start, etc.)
+- [ ] ^C to stop
+
+### 4. Discord disconnect surfaces
+
+- [ ] While `cargo run` is running, kill Discord (`pkill Discord`)
+- [ ] Within ~2 s the "Discord: Reconnecting in Xms" row appears in the tray menu
+- [ ] Restart Discord — "Discord: Connected" returns; icon returns to normal
+
+### 5. Helper crash surfaces
+
+- [ ] While `cargo run` is running, kill the helper (`pkill relay-helper`)
+- [ ] "Helper: Unavailable — &lt;detail&gt;" row appears in the menu
+- [ ] "Last error: …" row is visible and non-empty
+- [ ] Tray icon appears dimmed (error variant)
+
+### 6. Permission denied flow
+
+- [ ] System Settings → Privacy & Security → Automation → Relay → toggle Music **off**
+- [ ] Restart Relay (`cargo run`)
+- [ ] Tray menu shows "Helper: Apple Music access denied" and "Last error: Apple Music access denied"
+- [ ] "Open System Settings…" item is visible and enabled
+- [ ] Click "Open System Settings…" — Automation pane opens in System Settings
+- [ ] Re-enable Music in the Automation pane
+- [ ] Play a track → all rows return to normal; "Open System Settings…" disappears; "Last error" clears
+
+### 7. First-run notification
+
+- [ ] Delete `~/Library/Application Support/relay/.permission-prompt-shown` (if it exists)
+- [ ] Run `cargo run`
+- [ ] macOS notification appears: "macOS will ask for permission to read Apple Music. Click OK to enable Relay." with title "Relay"
+- [ ] Notification appears *before* any Apple Events permission prompt
+- [ ] Subsequent launches of `cargo run`: no notification fires again

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::RwLock;
 use tray_icon::{
-    menu::{CheckMenuItem, Menu, MenuItem, Submenu},
+    menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
     TrayIcon, TrayIconBuilder,
 };
 use winit::{
@@ -18,16 +18,17 @@ use winit::{
 
 use crate::config::Config;
 use crate::constants::{
-    TRAY_DISPLAY_ALBUM_LABEL, TRAY_DISPLAY_ARTIST_LABEL, TRAY_DISPLAY_ARTWORK_LABEL,
-    TRAY_DISPLAY_SUBMENU_LABEL, TRAY_DISPLAY_TITLE_LABEL,
+    SYSTEM_SETTINGS_AUTOMATION_URL, TRAY_DISPLAY_ALBUM_LABEL, TRAY_DISPLAY_ARTIST_LABEL,
+    TRAY_DISPLAY_ARTWORK_LABEL, TRAY_DISPLAY_SUBMENU_LABEL, TRAY_DISPLAY_TITLE_LABEL,
+    TRAY_OPEN_SETTINGS_LABEL,
 };
 use crate::pipeline::DisplayField;
 use crate::tray::icons::{self, TrayIconVariant};
-use crate::tray::TrayState;
+use crate::tray::{HelperHealth, TrayStatus};
 
 #[derive(Debug, Clone)]
 pub enum UserEvent {
-    StateUpdate(TrayState),
+    StatusUpdate(TrayStatus),
     TrayIconEvent(tray_icon::TrayIconEvent),
     MenuEvent(tray_icon::menu::MenuEvent),
 }
@@ -57,9 +58,15 @@ pub struct RelayApp {
     cfg: Arc<RwLock<Config>>,
 
     tray_icon: Option<TrayIcon>,
-    status_item: Option<MenuItem>,
-    details_item: Option<MenuItem>,
+
+    // Status row items.
+    playback_item: Option<MenuItem>,
+    discord_item: Option<MenuItem>,
+    helper_item: Option<MenuItem>,
+    last_error_item: Option<MenuItem>,
+    settings_item: Option<MenuItem>,
     quit_item: Option<MenuItem>,
+
     last_icon_variant: Option<TrayIconVariant>,
 
     // Display submenu toggles.
@@ -78,8 +85,11 @@ impl RelayApp {
             app_cmd_tx,
             cfg,
             tray_icon: None,
-            status_item: None,
-            details_item: None,
+            playback_item: None,
+            discord_item: None,
+            helper_item: None,
+            last_error_item: None,
+            settings_item: None,
             quit_item: None,
             last_icon_variant: None,
             display_title_item: None,
@@ -93,8 +103,12 @@ impl RelayApp {
         // Read the current display config (blocking — main thread, pre-loop-start).
         let display = self.cfg.blocking_read().display.clone();
 
-        let status_item = MenuItem::new(TrayState::Idle.label(), true, None);
-        let details_item = MenuItem::new("", false, None);
+        // Status rows — all start disabled (cosmetic display only).
+        let initial_status = TrayStatus::new();
+        let playback_item = MenuItem::new(initial_status.playback.row_text(), false, None);
+        let discord_item = MenuItem::new(initial_status.discord.row_text(), false, None);
+        let helper_item = MenuItem::new(initial_status.helper.row_text(), false, None);
+        let last_error_item = MenuItem::new("", false, None);
 
         // Display submenu with 4 checkable toggles.
         let display_title_item =
@@ -117,10 +131,29 @@ impl RelayApp {
         )
         .expect("failed to build display submenu");
 
+        // "Open System Settings…" — always present, toggled by PermissionDenied state.
+        // Empty text + disabled = invisible-ish when not in PermissionDenied state.
+        let settings_item = MenuItem::new("", false, None);
+
         let quit_item = MenuItem::new("Quit Relay", true, None);
 
-        let menu = Menu::with_items(&[&status_item, &details_item, &display_submenu, &quit_item])
-            .expect("failed to build tray menu");
+        let sep = || PredefinedMenuItem::separator();
+
+        let menu = Menu::with_items(&[
+            &playback_item,
+            &sep(),
+            &discord_item,
+            &helper_item,
+            &sep(),
+            &last_error_item,
+            &sep(),
+            &display_submenu,
+            &sep(),
+            &settings_item,
+            &sep(),
+            &quit_item,
+        ])
+        .expect("failed to build tray menu");
 
         let icon = icons::default_icon();
 
@@ -133,8 +166,11 @@ impl RelayApp {
 
         tray.set_icon_as_template(true);
 
-        self.status_item = Some(status_item);
-        self.details_item = Some(details_item);
+        self.playback_item = Some(playback_item);
+        self.discord_item = Some(discord_item);
+        self.helper_item = Some(helper_item);
+        self.last_error_item = Some(last_error_item);
+        self.settings_item = Some(settings_item);
         self.quit_item = Some(quit_item);
         self.display_title_item = Some(display_title_item);
         self.display_artist_item = Some(display_artist_item);
@@ -144,14 +180,22 @@ impl RelayApp {
         self.last_icon_variant = Some(TrayIconVariant::Normal);
     }
 
-    fn apply_state(&mut self, state: &TrayState) {
-        if let Some(item) = &self.status_item {
-            item.set_text(state.label());
+    fn apply_status(&mut self, status: &TrayStatus) {
+        if let Some(item) = &self.playback_item {
+            item.set_text(status.playback.row_text());
         }
 
-        if let Some(item) = &self.details_item {
-            if let Some(detail) = state.error_detail() {
-                item.set_text(detail);
+        if let Some(item) = &self.discord_item {
+            item.set_text(status.discord.row_text());
+        }
+
+        if let Some(item) = &self.helper_item {
+            item.set_text(status.helper.row_text());
+        }
+
+        if let Some(item) = &self.last_error_item {
+            if let Some(text) = status.last_error_row_text() {
+                item.set_text(text);
                 item.set_enabled(true);
             } else {
                 item.set_text("");
@@ -159,10 +203,22 @@ impl RelayApp {
             }
         }
 
-        let variant = state.icon_variant();
+        // "Open System Settings…" — only enabled/visible when PermissionDenied.
+        if let Some(item) = &self.settings_item {
+            if status.helper == HelperHealth::PermissionDenied {
+                item.set_text(TRAY_OPEN_SETTINGS_LABEL);
+                item.set_enabled(true);
+            } else {
+                item.set_text("");
+                item.set_enabled(false);
+            }
+        }
+
+        // Update icon variant.
+        let variant = status.icon_variant();
         if self.last_icon_variant != Some(variant) {
             if let Some(tray) = &self.tray_icon {
-                let icon = state.icon();
+                let icon = status.icon();
                 if let Err(e) = tray.set_icon_with_as_template(Some(icon), true) {
                     tracing::warn!("failed to update tray icon: {e}");
                 } else {
@@ -176,6 +232,21 @@ impl RelayApp {
         if self.quit_item.as_ref().is_some_and(|i| event.id == i.id()) {
             tracing::info!("quit requested via menu");
             let _ = self.app_cmd_tx.blocking_send(crate::AppCommand::Quit);
+            return;
+        }
+
+        // "Open System Settings…" click.
+        if self
+            .settings_item
+            .as_ref()
+            .is_some_and(|i| event.id == i.id())
+        {
+            if let Err(e) = std::process::Command::new("open")
+                .arg(SYSTEM_SETTINGS_AUTOMATION_URL)
+                .status()
+            {
+                tracing::warn!("failed to open system settings: {e}");
+            }
             return;
         }
 
@@ -238,8 +309,8 @@ impl ApplicationHandler<UserEvent> for RelayApp {
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
-            UserEvent::StateUpdate(state) => {
-                self.apply_state(&state);
+            UserEvent::StatusUpdate(status) => {
+                self.apply_status(&status);
             }
             // tray-icon 0.19 does not integrate with winit; left-click opens the menu automatically.
             UserEvent::TrayIconEvent(_tray_event) => {}

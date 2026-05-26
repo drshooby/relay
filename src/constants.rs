@@ -48,6 +48,24 @@ pub const TRAY_ERROR_HELPER_MESSAGE: &str = "media access unavailable";
 pub const TRAY_ERROR_DISCORD_MESSAGE: &str = "discord unavailable";
 pub const TRAY_ERROR_DISCORD_DISCONNECTED_DETAIL: &str = "discord ipc: disconnected";
 
+// Status dashboard row labels
+pub const TRAY_DISCORD_LABEL_CONNECTED: &str = "Discord: Connected";
+pub const TRAY_DISCORD_LABEL_PREFIX_RECONNECTING: &str = "Discord: Reconnecting in ";
+pub const TRAY_DISCORD_LABEL_DISCONNECTED: &str = "Discord: Disconnected";
+pub const TRAY_HELPER_LABEL_RUNNING: &str = "Helper: Running";
+pub const TRAY_HELPER_LABEL_PERMISSION_DENIED: &str = "Helper: Apple Music access denied";
+pub const TRAY_HELPER_LABEL_UNAVAILABLE_PREFIX: &str = "Helper: Unavailable \u{2014} ";
+pub const TRAY_LAST_ERROR_PREFIX: &str = "Last error: ";
+pub const TRAY_OPEN_SETTINGS_LABEL: &str = "Open System Settings\u{2026}";
+pub const TRAY_PERMISSION_DENIED_DETAIL: &str = "Apple Music access denied";
+pub const SYSTEM_SETTINGS_AUTOMATION_URL: &str =
+    "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation";
+pub const FIRST_RUN_NOTIFICATION_OSASCRIPT: &str =
+    "display notification \"macOS will ask for permission to read Apple Music. Click OK to enable Relay.\" with title \"Relay\"";
+pub const TRAY_PLAYBACK_IDLE_LABEL: &str = "Now Playing: Idle";
+pub const TRAY_PLAYBACK_PLAYING_PREFIX: &str = "Now Playing: ";
+pub const TRAY_PLAYBACK_PAUSED_PREFIX: &str = "Paused \u{2014} ";
+
 #[cfg(test)]
 mod tests {
     use super::*;

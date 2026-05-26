@@ -8,28 +8,34 @@ use relay::pipeline::{run_pipeline, AppCommand};
 use relay::tray::event_loop::{build_event_loop, RelayApp, UserEvent};
 
 fn main() -> anyhow::Result<()> {
-    // 1. Initialise tracing — reads RUST_LOG from environment.
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .init();
+    // 1. Initialise tracing — default to "off" so production builds are silent.
+    //    Set RUST_LOG=info (or debug/trace) to enable logs.
+    let filter = std::env::var("RUST_LOG")
+        .map(EnvFilter::new)
+        .unwrap_or_else(|_| EnvFilter::new("off"));
+    tracing_subscriber::fmt().with_env_filter(filter).init();
 
-    // 2. Load config — fall back to default on any error (e.g. first run).
+    // 2. First-run onboarding: fire a notification before the helper spawns so the
+    //    user sees Relay's copy *before* the OS Automation permission prompt.
+    relay::onboarding::maybe_show_first_run_notification();
+
+    // 3. Load config — fall back to default on any error (e.g. first run).
     let initial_config = config::load().unwrap_or_else(|e| {
         tracing::warn!("failed to load config, using defaults: {e}");
         Config::default()
     });
     let cfg = Arc::new(RwLock::new(initial_config));
 
-    // 3. Cross-thread channel: main → Tokio (commands).
+    // 4. Cross-thread channel: main → Tokio (commands).
     //    tokio::sync::mpsc works here: the main (winit) thread uses blocking_send,
     //    the Tokio pipeline uses .recv().await.
     let (app_cmd_tx, app_cmd_rx) = tokio::sync::mpsc::channel::<AppCommand>(8);
 
-    // 4. Build winit event loop on the main thread (macOS requirement).
+    // 5. Build winit event loop on the main thread (macOS requirement).
     let event_loop = build_event_loop();
     let proxy = event_loop.create_proxy();
 
-    // 5. Spawn the Tokio runtime on a dedicated OS thread so it never blocks the main thread.
+    // 6. Spawn the Tokio runtime on a dedicated OS thread so it never blocks the main thread.
     let cfg_pipeline = cfg.clone();
     let _tokio_thread = std::thread::spawn(move || {
         // multi_thread scheduler: work-stealing pool.
@@ -44,7 +50,7 @@ fn main() -> anyhow::Result<()> {
         });
     });
 
-    // 6. Run the winit event loop on the main thread (blocks until exit).
+    // 7. Run the winit event loop on the main thread (blocks until exit).
     run_event_loop(event_loop, app_cmd_tx, cfg)?;
 
     Ok(())
