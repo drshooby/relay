@@ -6,17 +6,14 @@ use winit::event_loop::EventLoopProxy;
 use crate::artwork::cache::ArtworkCache;
 use crate::artwork::itunes::{search_track, TrackLookup};
 use crate::config::{self, Config, DisplayConfig};
-use crate::constants::{
-    CHANNEL_BUFFER_SIZE, TRACK_DEBOUNCE_MS, TRAY_ERROR_DISCORD_DISCONNECTED_DETAIL,
-    TRAY_ERROR_DISCORD_MESSAGE,
-};
+use crate::constants::{CHANNEL_BUFFER_SIZE, TRACK_DEBOUNCE_MS, TRAY_PERMISSION_DENIED_DETAIL};
 use crate::discord::activity::{compute_started_at, TrackInfo};
 use crate::discord::client::{run_discord_client, DiscordCommand, DiscordStatus};
 use crate::media::debounce::Debouncer;
-use crate::media::event::{HelperCommand, MediaEvent};
+use crate::media::event::{HelperCommand, HelperStatus, MediaEvent};
 use crate::media::reader;
 use crate::tray::event_loop::UserEvent;
-use crate::tray::TrayState;
+use crate::tray::{DiscordHealth, HelperHealth, PlaybackStatus, TrayStatus};
 
 /// Which display field to toggle.
 #[derive(Debug, Clone, Copy)]
@@ -42,47 +39,6 @@ struct ActiveTrack {
     track_url: Option<String>,
     duration_secs: Option<u64>,
     paused: bool,
-}
-
-/// Tracks tray-affecting health so we can restore content state after recovery.
-struct TrayHealth {
-    helper_error: Option<TrayState>,
-    discord_connected: bool,
-    discord_was_connected: bool,
-    discord_error_detail: Option<String>,
-    content: TrayState,
-}
-
-impl TrayHealth {
-    fn new() -> Self {
-        Self {
-            helper_error: None,
-            discord_connected: false,
-            discord_was_connected: false,
-            discord_error_detail: None,
-            content: TrayState::Idle,
-        }
-    }
-
-    fn set_content(&mut self, state: TrayState) {
-        self.content = state;
-    }
-
-    fn resolved(&self) -> TrayState {
-        if let Some(err) = &self.helper_error {
-            return err.clone();
-        }
-        if self.discord_was_connected && !self.discord_connected {
-            return TrayState::Error {
-                message: TRAY_ERROR_DISCORD_MESSAGE.to_string(),
-                detail: self
-                    .discord_error_detail
-                    .clone()
-                    .unwrap_or_else(|| TRAY_ERROR_DISCORD_DISCONNECTED_DETAIL.to_string()),
-            };
-        }
-        self.content.clone()
-    }
 }
 
 fn now_unix_secs() -> i64 {
@@ -145,50 +101,62 @@ pub async fn run_pipeline(
         .and_then(|r| r.ok())
         .unwrap_or_default();
     let http_client = reqwest::Client::new();
-    let mut tray_health = TrayHealth::new();
-    let mut last_sent: Option<TrayState> = None;
+    let mut status = TrayStatus::new();
+    let mut last_sent: Option<TrayStatus> = None;
     let mut active_track: Option<ActiveTrack> = None;
 
-    let mut send_tray = |state: TrayState| {
-        if last_sent.as_ref() == Some(&state) {
+    let mut send_status = |s: TrayStatus| {
+        if last_sent.as_ref() == Some(&s) {
             return;
         }
-        last_sent = Some(state.clone());
-        let _ = proxy.send_event(UserEvent::StateUpdate(state));
+        last_sent = Some(s.clone());
+        let _ = proxy.send_event(UserEvent::StatusUpdate(s));
     };
 
     loop {
         tokio::select! {
             // Helper process status changes (exit / IO error).
-            Some(status) = status_rx.recv() => {
-                if let Some(error_state) = TrayState::from_helper_status(&status) {
-                    tracing::error!("helper status: {error_state:?}");
-                    tray_health.helper_error = Some(error_state);
-                    send_tray(tray_health.resolved());
+            Some(helper_status) = status_rx.recv() => {
+                match helper_status {
+                    HelperStatus::Running => {}
+                    HelperStatus::Exited { code } => {
+                        let detail = match code {
+                            Some(c) => format!("helper exited with code {}", c),
+                            None => "helper exited".to_string(),
+                        };
+                        tracing::error!("helper exited: {detail}");
+                        status.helper = HelperHealth::Unavailable { detail: detail.clone() };
+                        status.last_error = Some(detail);
+                        send_status(status.clone());
+                    }
+                    HelperStatus::IoError => {
+                        let detail = "helper io error".to_string();
+                        tracing::error!("{detail}");
+                        status.helper = HelperHealth::Unavailable { detail: detail.clone() };
+                        status.last_error = Some(detail);
+                        send_status(status.clone());
+                    }
                 }
             }
 
             Some(discord_status) = discord_status_rx.recv() => {
                 match discord_status {
                     DiscordStatus::Connected => {
-                        tray_health.discord_connected = true;
-                        tray_health.discord_was_connected = true;
-                        tray_health.discord_error_detail = None;
-                        send_tray(tray_health.resolved());
+                        tracing::info!("discord connected");
+                        status.discord = DiscordHealth::Connected;
+                        status.discord_was_connected = true;
+                        send_status(status.clone());
                     }
                     DiscordStatus::Disconnected { detail } => {
-                        tray_health.discord_connected = false;
-                        tray_health.discord_error_detail = Some(detail);
-                        if tray_health.discord_was_connected {
-                            send_tray(tray_health.resolved());
+                        status.discord = DiscordHealth::Disconnected { detail };
+                        if status.discord_was_connected {
+                            send_status(status.clone());
                         }
                     }
                     DiscordStatus::Reconnecting { backoff_ms } => {
-                        tray_health.discord_connected = false;
-                        tray_health.discord_error_detail =
-                            Some(format!("reconnecting in {backoff_ms}ms"));
-                        if tray_health.discord_was_connected {
-                            send_tray(tray_health.resolved());
+                        status.discord = DiscordHealth::Reconnecting { backoff_ms };
+                        if status.discord_was_connected {
+                            send_status(status.clone());
                         }
                     }
                 }
@@ -197,6 +165,12 @@ pub async fn run_pipeline(
             // Raw media events from the helper.
             Some(event) = event_rx.recv() => {
                 match &event {
+                    MediaEvent::PermissionDenied => {
+                        tracing::warn!("apple music permission denied");
+                        status.helper = HelperHealth::PermissionDenied;
+                        status.last_error = Some(TRAY_PERMISSION_DENIED_DETAIL.to_string());
+                        send_status(status.clone());
+                    }
                     MediaEvent::PositionChanged { .. } => {
                         if let MediaEvent::PositionChanged { elapsed_secs } = event {
                             if let Some(active) = active_track.as_ref() {
@@ -217,23 +191,35 @@ pub async fn run_pipeline(
                         }
                     }
                     MediaEvent::TrackChanged { .. } => {
+                        // Clear permission-denied state on recovery.
+                        if matches!(status.helper, HelperHealth::PermissionDenied) {
+                            status.helper = HelperHealth::Running;
+                            status.last_error = None;
+                        }
                         // Drop stale metadata until debounce completes so position_changed
                         // cannot advance the progress bar for the previous track.
                         active_track = None;
                         debouncer.submit(event, debounced_tx.clone());
                     }
                     MediaEvent::PlaybackPaused => {
+                        // Clear permission-denied state on recovery.
+                        if matches!(status.helper, HelperHealth::PermissionDenied) {
+                            status.helper = HelperHealth::Running;
+                            status.last_error = None;
+                        }
                         // Do NOT clear active_track here — let the debounced handler
                         // mutate the paused flag so rapid pause→resume doesn't lose
                         // track context.
                         debouncer.submit(event, debounced_tx.clone());
                     }
                     MediaEvent::PlaybackStopped => {
+                        // Clear permission-denied state on recovery.
+                        if matches!(status.helper, HelperHealth::PermissionDenied) {
+                            status.helper = HelperHealth::Running;
+                            status.last_error = None;
+                        }
                         active_track = None;
                         debouncer.submit(event, debounced_tx.clone());
-                    }
-                    MediaEvent::PermissionDenied => {
-                        // TODO(task6): route to TrayStatus
                     }
                 }
             }
@@ -254,11 +240,11 @@ pub async fn run_pipeline(
                             album,
                         };
 
-                        tray_health.set_content(TrayState::Playing {
+                        status.playback = PlaybackStatus::Playing {
                             title: title.clone(),
                             artist: artist.clone(),
-                        });
-                        send_tray(tray_health.resolved());
+                        };
+                        send_status(status.clone());
 
                         // Artwork + track URL: cache-first, then iTunes search.
                         let lookup = if let Some(cached) = artwork_cache.get(&artist, &title) {
@@ -315,6 +301,11 @@ pub async fn run_pipeline(
                     MediaEvent::PlaybackPaused => {
                         if let Some(active) = active_track.as_mut() {
                             active.paused = true;
+                            status.playback = PlaybackStatus::Paused {
+                                title: active.track.title.clone(),
+                                artist: active.track.artist.clone(),
+                            };
+                            send_status(status.clone());
                             let display = cfg.read().await.display.clone();
                             let _ = discord_tx
                                 .send(DiscordCommand::SetPausedActivity {
@@ -326,16 +317,16 @@ pub async fn run_pipeline(
                                 .await;
                         } else {
                             // No active track established yet — safe fallback.
-                            tray_health.set_content(TrayState::Idle);
-                            send_tray(tray_health.resolved());
+                            status.playback = PlaybackStatus::Idle;
+                            send_status(status.clone());
                             let _ = discord_tx.send(DiscordCommand::ClearActivity).await;
                         }
                     }
 
                     MediaEvent::PlaybackStopped => {
                         active_track = None;
-                        tray_health.set_content(TrayState::Idle);
-                        send_tray(tray_health.resolved());
+                        status.playback = PlaybackStatus::Idle;
+                        send_status(status.clone());
                         let _ = discord_tx.send(DiscordCommand::ClearActivity).await;
                     }
 
@@ -414,71 +405,73 @@ pub async fn run_pipeline(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::constants::{TRAY_ERROR_DISCORD_MESSAGE, TRAY_ERROR_HELPER_MESSAGE};
+    use crate::constants::TRAY_PERMISSION_DENIED_DETAIL;
+    use crate::tray::icons::TrayIconVariant;
+    use crate::tray::{DiscordHealth, HelperHealth, TrayStatus};
 
     #[test]
-    fn resolved_prefers_helper_error_over_discord() {
-        let mut health = TrayHealth::new();
-        health.helper_error = Some(TrayState::Error {
-            message: TRAY_ERROR_HELPER_MESSAGE.to_string(),
-            detail: "helper exited".to_string(),
-        });
-        health.discord_connected = false;
-        health.discord_was_connected = true;
-        health.discord_error_detail = Some("discord ipc: lost".to_string());
-
-        let state = health.resolved();
-        assert_eq!(state.label(), format!("Relay: {TRAY_ERROR_HELPER_MESSAGE}"));
+    fn status_shows_discord_error_after_disconnect() {
+        let mut status = TrayStatus::new();
+        status.discord_was_connected = true;
+        status.discord = DiscordHealth::Disconnected {
+            detail: "discord ipc: pipe closed".to_string(),
+        };
+        assert_eq!(status.discord.row_text(), "Discord: Disconnected");
+        assert_eq!(status.icon_variant(), TrayIconVariant::Error);
     }
 
     #[test]
-    fn resolved_shows_discord_error_after_disconnect() {
-        let mut health = TrayHealth::new();
-        health.discord_connected = false;
-        health.discord_was_connected = true;
-        health.discord_error_detail = Some("discord ipc: pipe closed".to_string());
-
-        let state = health.resolved();
-        assert_eq!(
-            state.label(),
-            format!("Relay: {TRAY_ERROR_DISCORD_MESSAGE}")
-        );
-        assert_eq!(state.error_detail(), Some("discord ipc: pipe closed"));
+    fn status_no_discord_error_before_first_connection() {
+        let mut s = TrayStatus::new();
+        s.discord = DiscordHealth::Disconnected {
+            detail: "not yet connected".into(),
+        };
+        // discord_was_connected is still false
+        assert_eq!(s.icon_variant(), TrayIconVariant::Normal);
     }
 
     #[test]
-    fn resolved_no_discord_error_before_first_connection() {
-        let health = TrayHealth::new();
-        assert_eq!(health.resolved(), TrayState::Idle);
+    fn status_returns_to_normal_after_discord_reconnect() {
+        let mut status = TrayStatus::new();
+        status.discord_was_connected = true;
+        status.discord = DiscordHealth::Disconnected {
+            detail: "lost".into(),
+        };
+        assert_eq!(status.icon_variant(), TrayIconVariant::Error);
+
+        status.discord = DiscordHealth::Connected;
+        assert_eq!(status.icon_variant(), TrayIconVariant::Normal);
     }
 
     #[test]
-    fn resolved_returns_content_when_healthy() {
-        let mut health = TrayHealth::new();
-        health.discord_connected = true;
-        health.discord_was_connected = true;
-        health.set_content(TrayState::Playing {
-            title: "Song".into(),
-            artist: "Artist".into(),
-        });
-
-        let state = health.resolved();
-        assert!(matches!(state, TrayState::Playing { .. }));
+    fn status_helper_unavailable_sets_error() {
+        let mut status = TrayStatus::new();
+        let detail = "helper exited with code 1".to_string();
+        status.helper = HelperHealth::Unavailable {
+            detail: detail.clone(),
+        };
+        status.last_error = Some(detail);
+        assert_eq!(status.icon_variant(), TrayIconVariant::Error);
     }
 
     #[test]
-    fn resolved_recovers_content_after_discord_reconnect() {
-        let mut health = TrayHealth::new();
-        health.discord_was_connected = true;
-        health.discord_connected = false;
-        health.discord_error_detail = Some("reconnecting in 1000ms".to_string());
-        health.set_content(TrayState::Idle);
+    fn permission_denied_then_track_changed_clears_helper_state() {
+        let mut status = TrayStatus::new();
 
-        let err = health.resolved();
-        assert!(matches!(err, TrayState::Error { .. }));
+        // Simulate permission denied
+        status.helper = HelperHealth::PermissionDenied;
+        status.last_error = Some(TRAY_PERMISSION_DENIED_DETAIL.to_string());
 
-        health.discord_connected = true;
-        health.discord_error_detail = None;
-        assert_eq!(health.resolved(), TrayState::Idle);
+        assert_eq!(status.helper, HelperHealth::PermissionDenied);
+        assert!(status.last_error.is_some());
+
+        // Simulate a successful track event arriving — should clear the permission state
+        if matches!(status.helper, HelperHealth::PermissionDenied) {
+            status.helper = HelperHealth::Running;
+            status.last_error = None;
+        }
+
+        assert_eq!(status.helper, HelperHealth::Running);
+        assert!(status.last_error.is_none());
     }
 }
