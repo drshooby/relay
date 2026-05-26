@@ -6,6 +6,10 @@ A macOS menu bar app that shows your Apple Music activity on Discord as "Listeni
   <img src="./assets/icons/relay.png" alt="relay logo">
 </p>
 
+## Install
+
+Download the latest `Relay.dmg` from the [GitHub Releases page](https://github.com/drshooby/relay/releases), open it, and drag `Relay.app` to your Applications folder. Launch it from Applications — Relay will appear in your menu bar (no Dock icon). macOS will prompt for Apple Music access on first launch.
+
 ## What it does
 
 - Watches Apple Music playback via a bundled Swift helper

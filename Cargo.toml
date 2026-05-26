@@ -25,3 +25,22 @@ tokio = { version = "1", features = ["test-util"] }
 
 [build-dependencies]
 # none needed; build.rs uses only std
+
+[package.metadata.packager]
+productName = "Relay"
+identifier = "com.drshooby.relay"
+category = "Music"
+description = "Apple Music → Discord Rich Presence"
+authors = ["David Shubov"]
+icons = ["assets/icons/Relay.icns"]
+formats = ["dmg"]
+beforePackagingCommand = "bash packaging/make-icns.sh"
+
+[[package.metadata.packager.resources]]
+src = "target/release/relay-helper"
+target = "relay-helper"
+
+[package.metadata.packager.macos]
+minimumSystemVersion = "11.0"
+signingIdentity = "-"
+infoPlistPath = "packaging/Info.plist"
