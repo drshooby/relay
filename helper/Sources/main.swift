@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import MediaPlayer
 
@@ -20,6 +21,8 @@ let positionChangeThresholdSecs = 3
 // Track last emitted title to suppress duplicate track_changed events
 var lastEmittedTitle: String? = nil
 var lastReportedElapsedSecs: Int? = nil
+// Track title at the moment of pause so resume can be detected and routed to AppleScript
+var lastPausedTitle: String? = nil
 
 func elapsedString(from info: [String: Any]?) -> String? {
     guard let elapsed = info?[MPNowPlayingInfoPropertyElapsedPlaybackTime] as? NSNumber else {
@@ -90,12 +93,19 @@ func handlePlayerInfo(_ userInfo: [String: Any]) {
     case "Playing":
         guard !name.isEmpty else {
             lastEmittedTitle = nil
+            lastPausedTitle = nil
             resetElapsedTracking()
             emit(["event": "playback_stopped"])
             log("playing but no track name → playback_stopped")
             return
         }
-        if name != lastEmittedTitle {
+        if name == lastPausedTitle {
+            // Resume on same track — use AppleScript for accurate position
+            lastPausedTitle = nil
+            emitCurrentState(observer: nowPlayingObserver, reason: "Music.playerInfo.resume")
+        } else if name != lastEmittedTitle {
+            // New track (or first play after clear)
+            lastPausedTitle = nil
             let nowPlaying = MPNowPlayingInfoCenter.default().nowPlayingInfo
             let elapsed = elapsedString(from: nowPlaying)
             let duration = durationString(from: nowPlaying)
@@ -109,6 +119,7 @@ func handlePlayerInfo(_ userInfo: [String: Any]) {
             )
         }
     case "Paused":
+        lastPausedTitle = lastEmittedTitle
         lastEmittedTitle = nil
         resetElapsedTracking()
         emit(["event": "playback_paused"])
@@ -116,6 +127,7 @@ func handlePlayerInfo(_ userInfo: [String: Any]) {
     default:
         // "Stopped" or any other state
         lastEmittedTitle = nil
+        lastPausedTitle = nil
         resetElapsedTracking()
         emit(["event": "playback_stopped"])
         log("playback_stopped (state: \(state))")
@@ -126,6 +138,8 @@ func handlePlayerInfo(_ userInfo: [String: Any]) {
 // system Now Playing infrastructure (not just Apple Music)
 class NowPlayingObserver: NSObject {
     var lastNowPlayingTitle: String? = nil
+    // Title saved at pause time — used to detect resume and trigger AppleScript fallback
+    var lastPausedNowPlayingTitle: String? = nil
 
     func startObserving() {
         MPNowPlayingInfoCenter.default().addObserver(
@@ -167,12 +181,19 @@ class NowPlayingObserver: NSObject {
 
             guard !title.isEmpty else {
                 lastNowPlayingTitle = nil
+                lastPausedNowPlayingTitle = nil
                 resetElapsedTracking()
                 emit(["event": "playback_stopped"])
                 log("MPNowPlaying: playing but no title → playback_stopped")
                 return
             }
-            if title != lastNowPlayingTitle {
+            if title == lastPausedNowPlayingTitle {
+                // Resume on same track — use AppleScript for accurate position
+                lastPausedNowPlayingTitle = nil
+                emitCurrentState(observer: self, reason: "MPNowPlaying.resume")
+            } else if title != lastNowPlayingTitle {
+                // New track (or first play after clear)
+                lastPausedNowPlayingTitle = nil
                 lastNowPlayingTitle = title
                 emitTrackChanged(
                     title: title,
@@ -186,17 +207,20 @@ class NowPlayingObserver: NSObject {
                 maybeEmitPositionChanged(newElapsedSecs: parsed, source: "MPNowPlaying")
             }
         case .paused:
+            lastPausedNowPlayingTitle = lastNowPlayingTitle
             lastNowPlayingTitle = nil
             resetElapsedTracking()
             emit(["event": "playback_paused"])
             log("MPNowPlaying: playback_paused")
         case .stopped, .interrupted:
             lastNowPlayingTitle = nil
+            lastPausedNowPlayingTitle = nil
             resetElapsedTracking()
             emit(["event": "playback_stopped"])
             log("MPNowPlaying: playback_stopped")
         default:
             lastNowPlayingTitle = nil
+            lastPausedNowPlayingTitle = nil
             resetElapsedTracking()
             emit(["event": "playback_stopped"])
             log("MPNowPlaying: playback_stopped (unknown state)")
@@ -297,6 +321,35 @@ DistributedNotificationCenter.default().addObserver(
 // Set up MPNowPlayingInfoCenter KVO observer (secondary; catches other MRCC-integrated players)
 let nowPlayingObserver = NowPlayingObserver()
 nowPlayingObserver.startObserving()
+
+// Observe Music.app lifecycle so Discord activity clears immediately on quit/crash (#33)
+NSWorkspace.shared.notificationCenter.addObserver(
+    forName: NSWorkspace.didTerminateApplicationNotification,
+    object: nil,
+    queue: .main
+) { note in
+    guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+          app.bundleIdentifier == "com.apple.Music" else { return }
+    lastEmittedTitle = nil
+    lastPausedTitle = nil
+    nowPlayingObserver.lastNowPlayingTitle = nil
+    nowPlayingObserver.lastPausedNowPlayingTitle = nil
+    resetElapsedTracking()
+    emit(["event": "playback_stopped"])
+    log("Music.app terminated → playback_stopped")
+}
+
+NSWorkspace.shared.notificationCenter.addObserver(
+    forName: NSWorkspace.didLaunchApplicationNotification,
+    object: nil,
+    queue: .main
+) { note in
+    guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+          app.bundleIdentifier == "com.apple.Music" else { return }
+    emit(["event": "playback_stopped"])
+    log("Music.app launched → playback_stopped (resets stale state)")
+}
+
 emitCurrentState(observer: nowPlayingObserver, reason: "startup")
 
 // Read newline-delimited JSON commands from stdin. The only command today is
