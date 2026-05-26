@@ -26,6 +26,14 @@ fn main() {
         panic!("swiftc failed to compile relay-helper");
     }
 
+    // Copy the compiled helper to a stable path so cargo-packager can find it.
+    let stable = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join(&profile)
+        .join(HELPER_BINARY_NAME);
+    std::fs::copy(&dest, &stable)
+        .unwrap_or_else(|e| panic!("failed to copy helper to stable target path: {e}"));
+
     println!("cargo:rerun-if-changed=helper/Sources/main.swift");
     println!("cargo:rustc-env=RELAY_HELPER_PATH={}", dest.display());
 }
