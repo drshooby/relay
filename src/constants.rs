@@ -74,6 +74,14 @@ pub const DISCORD_ACTIVITY_HELP_URL: &str =
 /// Filename for the artwork cache under the relay application support directory.
 pub const ARTWORK_CACHE_SUBDIR: &str = "artwork_cache.json";
 
+/// Filename for the errors log under the relay application support directory.
+pub const ERRORS_LOG_FILE: &str = "errors.jsonl";
+/// Maximum number of entries retained in the errors log before rotation.
+pub const ERRORS_LOG_MAX_LINES: usize = 200;
+
+/// GitHub repository URL shown in the Misc preferences tab.
+pub const GITHUB_REPO_URL: &str = "https://github.com/drshooby/relay";
+
 #[cfg(test)]
 mod tests {
     use super::*;

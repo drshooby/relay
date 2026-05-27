@@ -5,10 +5,12 @@ private struct NowPlayingSnapshot: Codable {
     var artist: String?
     var album: String?
     var artworkUrl: String?
+    var playing: Bool?
 
     enum CodingKeys: String, CodingKey {
         case title, artist, album
         case artworkUrl = "artwork_url"
+        case playing
     }
 }
 
@@ -23,39 +25,87 @@ struct NowPlayingView: View {
     }
 
     var body: some View {
-        VStack(spacing: 16) {
+        VStack {
+            Spacer()
+
             if let snap = snapshot {
-                if let urlStr = snap.artworkUrl, let url = URL(string: urlStr) {
-                    AsyncImage(url: url) { image in
-                        image.resizable().scaledToFit()
-                    } placeholder: {
-                        RoundedRectangle(cornerRadius: 8)
-                            .fill(Color.secondary.opacity(0.2))
+                VStack(spacing: 16) {
+                    // Artwork
+                    if let urlStr = snap.artworkUrl, let url = URL(string: urlStr) {
+                        AsyncImage(url: url) { phase in
+                            switch phase {
+                            case .success(let image):
+                                image
+                                    .resizable()
+                                    .scaledToFill()
+                            case .failure:
+                                artworkPlaceholder
+                            case .empty:
+                                artworkPlaceholder
+                            @unknown default:
+                                artworkPlaceholder
+                            }
+                        }
+                        .frame(width: 180, height: 180)
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .shadow(color: .black.opacity(0.25), radius: 12, x: 0, y: 4)
+                    } else {
+                        artworkPlaceholder
+                            .frame(width: 180, height: 180)
+                            .clipShape(RoundedRectangle(cornerRadius: 12))
                     }
-                    .frame(width: 120, height: 120)
-                    .cornerRadius(8)
-                }
-                VStack(spacing: 4) {
-                    Text(snap.title ?? "Unknown Title")
-                        .font(.headline)
-                    Text(snap.artist ?? "Unknown Artist")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                    if let album = snap.album {
-                        Text(album)
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
+
+                    // Playing/Paused badge
+                    let isPlaying = snap.playing ?? true
+                    Text(isPlaying ? "Playing" : "Paused")
+                        .font(.caption)
+                        .fontWeight(.semibold)
+                        .foregroundStyle(isPlaying ? Color.green : Color.secondary)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 4)
+                        .background(
+                            (isPlaying ? Color.green : Color.secondary).opacity(0.15)
+                        )
+                        .clipShape(Capsule())
+
+                    // Track info
+                    VStack(spacing: 6) {
+                        Text(snap.title ?? "Unknown Title")
+                            .font(.title2)
+                            .fontWeight(.semibold)
+                            .multilineTextAlignment(.center)
+                            .lineLimit(2)
+
+                        Text(snap.artist ?? "Unknown Artist")
+                            .font(.body)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                            .lineLimit(1)
+
+                        if let album = snap.album {
+                            Text(album)
+                                .font(.subheadline)
+                                .foregroundStyle(.tertiary)
+                                .multilineTextAlignment(.center)
+                                .lineLimit(1)
+                        }
                     }
                 }
+                .padding(.horizontal, 24)
             } else {
-                Image(systemName: "music.note")
-                    .font(.system(size: 48))
-                    .foregroundStyle(.secondary)
-                Text("Not playing")
-                    .foregroundStyle(.secondary)
+                VStack(spacing: 12) {
+                    Image(systemName: "music.note")
+                        .font(.system(size: 52))
+                        .foregroundStyle(.secondary)
+                    Text("Not Playing")
+                        .font(.title3)
+                        .foregroundStyle(.secondary)
+                }
             }
+
+            Spacer()
         }
-        .padding()
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear {
             loadSnapshot()
             pollTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
@@ -66,6 +116,16 @@ struct NowPlayingView: View {
             pollTimer?.invalidate()
             pollTimer = nil
         }
+    }
+
+    private var artworkPlaceholder: some View {
+        RoundedRectangle(cornerRadius: 12)
+            .fill(Color.secondary.opacity(0.15))
+            .overlay(
+                Image(systemName: "music.note")
+                    .font(.system(size: 40))
+                    .foregroundStyle(.secondary.opacity(0.5))
+            )
     }
 
     private func loadSnapshot() {

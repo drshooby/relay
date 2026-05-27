@@ -11,6 +11,7 @@ use crate::constants::{
 };
 use crate::discord::activity::{compute_started_at, TrackInfo};
 use crate::discord::client::{run_discord_client, DiscordCommand, DiscordStatus};
+use crate::errors;
 use crate::media::debounce::Debouncer;
 use crate::media::event::{HelperCommand, HelperStatus, MediaEvent};
 use crate::media::reader;
@@ -201,14 +202,16 @@ pub async fn run_pipeline(
                         };
                         tracing::error!("helper exited: {detail}");
                         status.helper = HelperHealth::Unavailable { detail: detail.clone() };
-                        status.last_error = Some(detail);
+                        status.last_error = Some(detail.clone());
+                        errors::record("helper", detail).await;
                         send_status(status.clone());
                     }
                     HelperStatus::IoError => {
                         let detail = "helper io error".to_string();
                         tracing::error!("{detail}");
                         status.helper = HelperHealth::Unavailable { detail: detail.clone() };
-                        status.last_error = Some(detail);
+                        status.last_error = Some(detail.clone());
+                        errors::record("helper", detail).await;
                         send_status(status.clone());
                     }
                 }
@@ -223,6 +226,13 @@ pub async fn run_pipeline(
                         send_status(status.clone());
                     }
                     DiscordStatus::Disconnected { detail } => {
+                        // Only record in the errors log on permanent disconnect
+                        // (i.e. when we were previously connected). Transient
+                        // disconnects during reconnect backoff are NOT recorded
+                        // individually — only the final give-up state is.
+                        if status.discord_was_connected {
+                            errors::record("discord", detail.clone()).await;
+                        }
                         status.discord = DiscordHealth::Disconnected { detail };
                         if status.discord_was_connected {
                             send_status(status.clone());
@@ -244,6 +254,7 @@ pub async fn run_pipeline(
                         tracing::warn!("apple music permission denied");
                         status.helper = HelperHealth::PermissionDenied;
                         status.last_error = Some(TRAY_PERMISSION_DENIED_DETAIL.to_string());
+                        errors::record("helper", TRAY_PERMISSION_DENIED_DETAIL).await;
                         send_status(status.clone());
                     }
                     MediaEvent::PositionChanged { .. } => {
@@ -405,6 +416,7 @@ pub async fn run_pipeline(
                                 "artist": active.track.artist,
                                 "album": active.track.album,
                                 "artwork_url": active.artwork_url,
+                                "playing": !active.paused,
                             });
                             if let Ok(dir) = config::data_dir() {
                                 tokio::task::spawn_blocking(move || {

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::RwLock;
 use tray_icon::{
-    menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
+    menu::{Menu, MenuItem, PredefinedMenuItem},
     TrayIcon, TrayIconBuilder,
 };
 use winit::{
@@ -18,11 +18,8 @@ use winit::{
 
 use crate::config::Config;
 use crate::constants::{
-    SYSTEM_SETTINGS_AUTOMATION_URL, TRAY_DISPLAY_ALBUM_LABEL, TRAY_DISPLAY_ARTIST_LABEL,
-    TRAY_DISPLAY_ARTWORK_LABEL, TRAY_DISPLAY_SUBMENU_LABEL, TRAY_DISPLAY_TITLE_LABEL,
-    TRAY_OPEN_SETTINGS_LABEL, TRAY_PREFERENCES_LABEL,
+    SYSTEM_SETTINGS_AUTOMATION_URL, TRAY_OPEN_SETTINGS_LABEL, TRAY_PREFERENCES_LABEL,
 };
-use crate::pipeline::DisplayField;
 use crate::tray::icons::{self, TrayIconVariant};
 use crate::tray::{HelperHealth, TrayStatus};
 
@@ -54,140 +51,151 @@ pub struct RelayApp {
     /// Command sender for the Tokio pipeline.
     app_cmd_tx: tokio::sync::mpsc::Sender<crate::AppCommand>,
 
-    /// Shared config — used to read initial display state when building the tray.
-    cfg: Arc<RwLock<Config>>,
-
     tray_icon: Option<TrayIcon>,
 
     // Status row items.
     playback_item: Option<MenuItem>,
     discord_item: Option<MenuItem>,
     helper_item: Option<MenuItem>,
-    last_error_item: Option<MenuItem>,
+    /// "Open System Settings…" — present only when helper is PermissionDenied.
+    /// When the health state transitions to/from PermissionDenied the entire
+    /// menu is rebuilt because tray-icon 0.19 does not expose set_visible on
+    /// MenuItem.
     settings_item: Option<MenuItem>,
     quit_item: Option<MenuItem>,
 
     last_icon_variant: Option<TrayIconVariant>,
 
-    // Display submenu toggles.
-    display_title_item: Option<CheckMenuItem>,
-    display_artist_item: Option<CheckMenuItem>,
-    display_album_item: Option<CheckMenuItem>,
-    display_artwork_item: Option<CheckMenuItem>,
-
     prefs_item: Option<MenuItem>,
+
+    /// Tracks whether the settings item is currently present in the menu.
+    settings_visible: bool,
 }
 
 impl RelayApp {
     pub fn new(
         app_cmd_tx: tokio::sync::mpsc::Sender<crate::AppCommand>,
-        cfg: Arc<RwLock<Config>>,
+        _cfg: Arc<RwLock<Config>>,
     ) -> Self {
         Self {
             app_cmd_tx,
-            cfg,
             tray_icon: None,
             playback_item: None,
             discord_item: None,
             helper_item: None,
-            last_error_item: None,
             settings_item: None,
             quit_item: None,
             last_icon_variant: None,
-            display_title_item: None,
-            display_artist_item: None,
-            display_album_item: None,
-            display_artwork_item: None,
             prefs_item: None,
+            settings_visible: false,
         }
     }
 
     fn build_tray(&mut self) {
-        // Read the current display config (blocking — main thread, pre-loop-start).
-        let display = self.cfg.blocking_read().display.clone();
+        self.rebuild_menu(false);
+    }
 
+    /// Rebuild the tray menu. `with_settings` controls whether the
+    /// "Open System Settings…" item is included.
+    ///
+    /// tray-icon 0.19 does not expose `set_visible` on `MenuItem`, so we
+    /// rebuild the entire menu whenever the PermissionDenied state changes.
+    fn rebuild_menu(&mut self, with_settings: bool) {
         // Status rows — all start disabled (cosmetic display only).
         let initial_status = TrayStatus::new();
-        let playback_item = MenuItem::new(initial_status.playback.row_text(), false, None);
-        let discord_item = MenuItem::new(initial_status.discord.row_text(), false, None);
-        let helper_item = MenuItem::new(initial_status.helper.row_text(), false, None);
-        let last_error_item = MenuItem::new("", false, None);
+        let playback_text = self
+            .playback_item
+            .as_ref()
+            .map(|i| i.text())
+            .unwrap_or_else(|| initial_status.playback.row_text());
+        let discord_text = self
+            .discord_item
+            .as_ref()
+            .map(|i| i.text())
+            .unwrap_or_else(|| initial_status.discord.row_text());
+        let helper_text = self
+            .helper_item
+            .as_ref()
+            .map(|i| i.text())
+            .unwrap_or_else(|| initial_status.helper.row_text());
 
-        // Display submenu with 4 checkable toggles.
-        let display_title_item =
-            CheckMenuItem::new(TRAY_DISPLAY_TITLE_LABEL, true, display.show_title, None);
-        let display_artist_item =
-            CheckMenuItem::new(TRAY_DISPLAY_ARTIST_LABEL, true, display.show_artist, None);
-        let display_album_item =
-            CheckMenuItem::new(TRAY_DISPLAY_ALBUM_LABEL, true, display.show_album, None);
-        let display_artwork_item =
-            CheckMenuItem::new(TRAY_DISPLAY_ARTWORK_LABEL, true, display.show_artwork, None);
-        let display_submenu = Submenu::with_items(
-            TRAY_DISPLAY_SUBMENU_LABEL,
-            true,
-            &[
-                &display_title_item,
-                &display_artist_item,
-                &display_album_item,
-                &display_artwork_item,
-            ],
-        )
-        .expect("failed to build display submenu");
-
-        // "Open System Settings…" — always present, toggled by PermissionDenied state.
-        // Empty text + disabled = invisible-ish when not in PermissionDenied state.
-        let settings_item = MenuItem::new("", false, None);
+        let playback_item = MenuItem::new(playback_text, false, None);
+        let discord_item = MenuItem::new(discord_text, false, None);
+        let helper_item = MenuItem::new(helper_text, false, None);
 
         let prefs_item = MenuItem::new(TRAY_PREFERENCES_LABEL, true, None);
         let quit_item = MenuItem::new("Quit Relay", true, None);
 
         let sep = || PredefinedMenuItem::separator();
 
-        let menu = Menu::with_items(&[
-            &playback_item,
-            &sep(),
-            &discord_item,
-            &helper_item,
-            &sep(),
-            &last_error_item,
-            &sep(),
-            &display_submenu,
-            &sep(),
-            &prefs_item,
-            &sep(),
-            &settings_item,
-            &sep(),
-            &quit_item,
-        ])
-        .expect("failed to build tray menu");
+        let menu = if with_settings {
+            let settings_item = MenuItem::new(TRAY_OPEN_SETTINGS_LABEL, true, None);
+            let m = Menu::with_items(&[
+                &playback_item,
+                &sep(),
+                &discord_item,
+                &helper_item,
+                &sep(),
+                &settings_item,
+                &sep(),
+                &prefs_item,
+                &sep(),
+                &quit_item,
+            ])
+            .expect("failed to build tray menu");
+            self.settings_item = Some(settings_item);
+            m
+        } else {
+            let m = Menu::with_items(&[
+                &playback_item,
+                &sep(),
+                &discord_item,
+                &helper_item,
+                &sep(),
+                &prefs_item,
+                &sep(),
+                &quit_item,
+            ])
+            .expect("failed to build tray menu");
+            self.settings_item = None;
+            m
+        };
 
-        let icon = icons::default_icon();
+        self.quit_item = Some(quit_item);
+        self.prefs_item = Some(prefs_item);
 
-        let tray = TrayIconBuilder::new()
-            .with_menu(Box::new(menu))
-            .with_icon(icon)
-            .with_tooltip("Relay")
-            .build()
-            .expect("failed to build tray icon");
-
-        tray.set_icon_as_template(true);
+        if let Some(tray) = &self.tray_icon {
+            tray.set_menu(Some(Box::new(menu)));
+        } else {
+            // Initial build — create the tray icon.
+            let icon = icons::default_icon();
+            let tray = TrayIconBuilder::new()
+                .with_menu(Box::new(menu))
+                .with_icon(icon)
+                .with_tooltip("Relay")
+                .build()
+                .expect("failed to build tray icon");
+            tray.set_icon_as_template(true);
+            self.tray_icon = Some(tray);
+            self.last_icon_variant = Some(TrayIconVariant::Normal);
+        }
 
         self.playback_item = Some(playback_item);
         self.discord_item = Some(discord_item);
         self.helper_item = Some(helper_item);
-        self.last_error_item = Some(last_error_item);
-        self.settings_item = Some(settings_item);
-        self.quit_item = Some(quit_item);
-        self.display_title_item = Some(display_title_item);
-        self.display_artist_item = Some(display_artist_item);
-        self.display_album_item = Some(display_album_item);
-        self.display_artwork_item = Some(display_artwork_item);
-        self.prefs_item = Some(prefs_item);
-        self.tray_icon = Some(tray);
-        self.last_icon_variant = Some(TrayIconVariant::Normal);
+        self.settings_visible = with_settings;
     }
 
     fn apply_status(&mut self, status: &TrayStatus) {
+        let permission_denied = status.helper == HelperHealth::PermissionDenied;
+
+        // Rebuild menu if PermissionDenied state has changed so that the
+        // "Open System Settings…" item appears/disappears cleanly.
+        // tray-icon 0.19 has no set_visible, so we rebuild the whole menu.
+        if permission_denied != self.settings_visible {
+            self.rebuild_menu(permission_denied);
+        }
+
         if let Some(item) = &self.playback_item {
             item.set_text(status.playback.row_text());
         }
@@ -198,27 +206,6 @@ impl RelayApp {
 
         if let Some(item) = &self.helper_item {
             item.set_text(status.helper.row_text());
-        }
-
-        if let Some(item) = &self.last_error_item {
-            if let Some(text) = status.last_error_row_text() {
-                item.set_text(text);
-                item.set_enabled(true);
-            } else {
-                item.set_text("");
-                item.set_enabled(false);
-            }
-        }
-
-        // "Open System Settings…" — only enabled/visible when PermissionDenied.
-        if let Some(item) = &self.settings_item {
-            if status.helper == HelperHealth::PermissionDenied {
-                item.set_text(TRAY_OPEN_SETTINGS_LABEL);
-                item.set_enabled(true);
-            } else {
-                item.set_text("");
-                item.set_enabled(false);
-            }
         }
 
         // Update icon variant.
@@ -263,30 +250,6 @@ impl RelayApp {
                 .status()
             {
                 tracing::warn!("failed to open system settings: {e}");
-            }
-            return;
-        }
-
-        // Display toggle handlers: read the new checked state and forward to pipeline.
-        let display_toggles: &[(Option<&CheckMenuItem>, DisplayField)] = &[
-            (self.display_title_item.as_ref(), DisplayField::Title),
-            (self.display_artist_item.as_ref(), DisplayField::Artist),
-            (self.display_album_item.as_ref(), DisplayField::Album),
-            (self.display_artwork_item.as_ref(), DisplayField::Artwork),
-        ];
-        for (item_opt, field) in display_toggles {
-            if let Some(item) = item_opt {
-                if event.id == item.id() {
-                    let enabled = item.is_checked();
-                    tracing::debug!("display toggle {:?} -> {enabled}", field);
-                    let _ = self
-                        .app_cmd_tx
-                        .blocking_send(crate::AppCommand::SetDisplayField {
-                            field: *field,
-                            enabled,
-                        });
-                    return;
-                }
             }
         }
     }

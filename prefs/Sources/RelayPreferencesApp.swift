@@ -9,15 +9,17 @@ struct RelayPreferencesApp: App {
             TabView {
                 GeneralSettingsView(config: config)
                     .tabItem { Label("General", systemImage: "gear") }
-                DisplaySettingsView(config: config)
-                    .tabItem { Label("Display", systemImage: "eye") }
                 NowPlayingView()
                     .tabItem { Label("Now Playing", systemImage: "music.note") }
                 StorageView()
                     .tabItem { Label("Storage", systemImage: "internaldrive") }
+                ErrorsView()
+                    .tabItem { Label("Errors", systemImage: "exclamationmark.triangle") }
+                MiscView()
+                    .tabItem { Label("Misc", systemImage: "ellipsis.circle") }
             }
             .padding()
-            .frame(minWidth: 480, minHeight: 360)
+            .frame(minWidth: 480, minHeight: 420)
             .onAppear { config.load() }
         }
         .windowResizability(.contentSize)
