@@ -66,6 +66,14 @@ pub const TRAY_PLAYBACK_IDLE_LABEL: &str = "Now Playing: Idle";
 pub const TRAY_PLAYBACK_PLAYING_PREFIX: &str = "Now Playing: ";
 pub const TRAY_PLAYBACK_PAUSED_PREFIX: &str = "Paused \u{2014} ";
 
+pub const TRAY_PREFERENCES_LABEL: &str = "Preferences\u{2026}";
+pub const PREFS_APP_NAME: &str = "RelayPreferences.app";
+pub const NOWPLAYING_SNAPSHOT_FILE: &str = "nowplaying.json";
+pub const DISCORD_ACTIVITY_HELP_URL: &str =
+    "https://support.discord.com/hc/en-us/articles/115000076487";
+/// Filename for the artwork cache under the relay application support directory.
+pub const ARTWORK_CACHE_SUBDIR: &str = "artwork_cache.json";
+
 #[cfg(test)]
 mod tests {
     use super::*;

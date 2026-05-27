@@ -17,6 +17,11 @@ impl Debouncer {
         }
     }
 
+    /// Update the debounce delay. Takes effect on the next `submit` call.
+    pub fn set_duration(&mut self, delay: Duration) {
+        self.delay = delay;
+    }
+
     /// Submit an event. Aborts any pending timer and starts a new one.
     /// After the delay, the event is sent on `tx`.
     pub fn submit(&mut self, event: MediaEvent, tx: mpsc::Sender<MediaEvent>) {

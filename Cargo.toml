@@ -18,6 +18,7 @@ tray-icon = "0.19"
 winit = "0.30"
 png = "0.17"
 discord-rich-presence = "1.1.0"
+notify = "6.1"
 
 [dev-dependencies]
 tempfile = "3"
@@ -39,6 +40,10 @@ beforePackagingCommand = "bash packaging/make-icns.sh"
 [[package.metadata.packager.resources]]
 src = "target/release/relay-helper"
 target = "relay-helper"
+
+[[package.metadata.packager.resources]]
+src = "target/release/RelayPreferences.app"
+target = "RelayPreferences.app"
 
 [package.metadata.packager.macos]
 minimumSystemVersion = "11.0"

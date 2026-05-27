@@ -20,7 +20,7 @@ use crate::config::Config;
 use crate::constants::{
     SYSTEM_SETTINGS_AUTOMATION_URL, TRAY_DISPLAY_ALBUM_LABEL, TRAY_DISPLAY_ARTIST_LABEL,
     TRAY_DISPLAY_ARTWORK_LABEL, TRAY_DISPLAY_SUBMENU_LABEL, TRAY_DISPLAY_TITLE_LABEL,
-    TRAY_OPEN_SETTINGS_LABEL,
+    TRAY_OPEN_SETTINGS_LABEL, TRAY_PREFERENCES_LABEL,
 };
 use crate::pipeline::DisplayField;
 use crate::tray::icons::{self, TrayIconVariant};
@@ -74,6 +74,8 @@ pub struct RelayApp {
     display_artist_item: Option<CheckMenuItem>,
     display_album_item: Option<CheckMenuItem>,
     display_artwork_item: Option<CheckMenuItem>,
+
+    prefs_item: Option<MenuItem>,
 }
 
 impl RelayApp {
@@ -96,6 +98,7 @@ impl RelayApp {
             display_artist_item: None,
             display_album_item: None,
             display_artwork_item: None,
+            prefs_item: None,
         }
     }
 
@@ -135,6 +138,7 @@ impl RelayApp {
         // Empty text + disabled = invisible-ish when not in PermissionDenied state.
         let settings_item = MenuItem::new("", false, None);
 
+        let prefs_item = MenuItem::new(TRAY_PREFERENCES_LABEL, true, None);
         let quit_item = MenuItem::new("Quit Relay", true, None);
 
         let sep = || PredefinedMenuItem::separator();
@@ -148,6 +152,8 @@ impl RelayApp {
             &last_error_item,
             &sep(),
             &display_submenu,
+            &sep(),
+            &prefs_item,
             &sep(),
             &settings_item,
             &sep(),
@@ -176,6 +182,7 @@ impl RelayApp {
         self.display_artist_item = Some(display_artist_item);
         self.display_album_item = Some(display_album_item);
         self.display_artwork_item = Some(display_artwork_item);
+        self.prefs_item = Some(prefs_item);
         self.tray_icon = Some(tray);
         self.last_icon_variant = Some(TrayIconVariant::Normal);
     }
@@ -232,6 +239,16 @@ impl RelayApp {
         if self.quit_item.as_ref().is_some_and(|i| event.id == i.id()) {
             tracing::info!("quit requested via menu");
             let _ = self.app_cmd_tx.blocking_send(crate::AppCommand::Quit);
+            return;
+        }
+
+        // "Preferences…" click — open the bundled SwiftUI prefs app.
+        if self.prefs_item.as_ref().is_some_and(|i| event.id == i.id()) {
+            use crate::media::prefs_path::resolve_prefs_path;
+            let prefs_path = resolve_prefs_path();
+            if let Err(e) = std::process::Command::new("open").arg(&prefs_path).status() {
+                tracing::warn!("failed to open preferences app: {e}");
+            }
             return;
         }
 

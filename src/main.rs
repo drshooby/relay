@@ -35,6 +35,72 @@ fn main() -> anyhow::Result<()> {
     let event_loop = build_event_loop();
     let proxy = event_loop.create_proxy();
 
+    // 5b. Spawn a file-watcher thread to pick up config.toml changes written by the prefs app.
+    // Uses notify's RecommendedWatcher (FSEvents on macOS). Sends AppCommand::ReloadConfig
+    // to the pipeline so debounce_ms is updated without requiring a restart.
+    let watcher_cmd_tx = app_cmd_tx.clone();
+    let _watcher_thread = std::thread::spawn(move || {
+        use notify::{Config as NotifyConfig, RecommendedWatcher, RecursiveMode, Watcher};
+        use std::sync::mpsc::channel;
+
+        let config_path = match relay::config::config_path() {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!("cannot watch config: failed to resolve config path: {e}");
+                return;
+            }
+        };
+
+        let watch_dir = match config_path.parent() {
+            Some(d) => d.to_owned(),
+            None => {
+                tracing::warn!("config path has no parent directory; watcher not started");
+                return;
+            }
+        };
+
+        let (tx, rx) = channel();
+        let mut watcher = match RecommendedWatcher::new(tx, NotifyConfig::default()) {
+            Ok(w) => w,
+            Err(e) => {
+                tracing::warn!("failed to create config file watcher: {e}");
+                return;
+            }
+        };
+
+        if let Err(e) = watcher.watch(&watch_dir, RecursiveMode::NonRecursive) {
+            tracing::warn!("failed to watch config directory: {e}");
+            return;
+        }
+
+        tracing::info!("watching config directory for changes");
+
+        for result in &rx {
+            match result {
+                Ok(event) => {
+                    let is_config = event.paths.iter().any(|p| p == &config_path);
+                    if !is_config {
+                        continue;
+                    }
+                    let reloaded = match relay::config::load() {
+                        Ok(c) => c,
+                        Err(e) => {
+                            tracing::warn!("config reload failed: {e}");
+                            continue;
+                        }
+                    };
+                    tracing::info!("config reloaded from disk");
+                    let debounce_ms = reloaded.playback.debounce_ms;
+                    let _ = watcher_cmd_tx
+                        .blocking_send(relay::pipeline::AppCommand::ReloadConfig { debounce_ms });
+                }
+                Err(e) => {
+                    tracing::warn!("config watcher error: {e}");
+                }
+            }
+        }
+    });
+
     // 6. Spawn the Tokio runtime on a dedicated OS thread so it never blocks the main thread.
     let cfg_pipeline = cfg.clone();
     let _tokio_thread = std::thread::spawn(move || {

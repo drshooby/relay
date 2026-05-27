@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
+use crate::constants::TRACK_DEBOUNCE_MS;
+
 /// Per-field Discord display toggles. Defaults to all enabled.
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
 #[serde(default)]
@@ -23,10 +25,26 @@ impl Default for DisplayConfig {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+#[serde(default)]
+pub struct PlaybackConfig {
+    pub debounce_ms: u64,
+}
+
+impl Default for PlaybackConfig {
+    fn default() -> Self {
+        Self {
+            debounce_ms: TRACK_DEBOUNCE_MS,
+        }
+    }
+}
+
 #[derive(Debug, Default, Serialize, Deserialize, PartialEq, Clone)]
 pub struct Config {
     #[serde(default)]
     pub display: DisplayConfig,
+    #[serde(default)]
+    pub playback: PlaybackConfig,
 }
 
 #[derive(Debug, Error)]
@@ -159,9 +177,43 @@ mod tests {
                 show_album: false,
                 show_artwork: false,
             },
+            playback: PlaybackConfig::default(),
         };
         save_to_dir(&cfg, dir.path()).unwrap();
         let reloaded = load_from_dir(dir.path()).unwrap();
         assert_eq!(reloaded, cfg);
+    }
+
+    #[test]
+    fn playback_config_defaults_to_track_debounce_ms() {
+        use crate::constants::TRACK_DEBOUNCE_MS;
+        let cfg = Config::default();
+        assert_eq!(cfg.playback.debounce_ms, TRACK_DEBOUNCE_MS);
+    }
+
+    #[test]
+    fn playback_config_partial_override_preserves_display_defaults() {
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "[playback]\ndebounce_ms = 500\n",
+        )
+        .unwrap();
+        let cfg = load_from_dir(dir.path()).unwrap();
+        assert_eq!(cfg.playback.debounce_ms, 500);
+        assert!(cfg.display.show_title);
+        assert!(cfg.display.show_artist);
+    }
+
+    #[test]
+    fn config_round_trips_with_playback_section() {
+        let dir = tempdir().unwrap();
+        let cfg = Config {
+            display: DisplayConfig::default(),
+            playback: PlaybackConfig { debounce_ms: 800 },
+        };
+        save_to_dir(&cfg, dir.path()).unwrap();
+        let reloaded = load_from_dir(dir.path()).unwrap();
+        assert_eq!(reloaded.playback.debounce_ms, 800);
     }
 }

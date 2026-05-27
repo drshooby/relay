@@ -6,7 +6,9 @@ use winit::event_loop::EventLoopProxy;
 use crate::artwork::cache::ArtworkCache;
 use crate::artwork::itunes::{search_track, TrackLookup};
 use crate::config::{self, Config, DisplayConfig};
-use crate::constants::{CHANNEL_BUFFER_SIZE, TRACK_DEBOUNCE_MS, TRAY_PERMISSION_DENIED_DETAIL};
+use crate::constants::{
+    CHANNEL_BUFFER_SIZE, NOWPLAYING_SNAPSHOT_FILE, TRAY_PERMISSION_DENIED_DETAIL,
+};
 use crate::discord::activity::{compute_started_at, TrackInfo};
 use crate::discord::client::{run_discord_client, DiscordCommand, DiscordStatus};
 use crate::media::debounce::Debouncer;
@@ -28,7 +30,14 @@ pub enum DisplayField {
 #[derive(Debug)]
 pub enum AppCommand {
     Quit,
-    SetDisplayField { field: DisplayField, enabled: bool },
+    SetDisplayField {
+        field: DisplayField,
+        enabled: bool,
+    },
+    /// Live-reload the debounce duration from config (written by the prefs app).
+    ReloadConfig {
+        debounce_ms: u64,
+    },
 }
 
 /// Cached Discord activity fields reused for position-only updates.
@@ -125,7 +134,8 @@ pub async fn run_pipeline(
     });
 
     // Pipeline state.
-    let mut debouncer = Debouncer::new(std::time::Duration::from_millis(TRACK_DEBOUNCE_MS));
+    let initial_debounce_ms = cfg.read().await.playback.debounce_ms;
+    let mut debouncer = Debouncer::new(std::time::Duration::from_millis(initial_debounce_ms));
     let (debounced_tx, mut debounced_rx) = mpsc::channel::<MediaEvent>(CHANNEL_BUFFER_SIZE);
     let mut artwork_cache = tokio::task::spawn_blocking(ArtworkCache::load)
         .await
@@ -354,15 +364,40 @@ pub async fn run_pipeline(
                             paused: false,
                         };
                         active_track = Some(active.clone());
-                        let display = cfg.read().await.display.clone();
+                        let cfg_guard = cfg.read().await;
+                        let display = cfg_guard.display.clone();
+                        let debounce_ms = cfg_guard.playback.debounce_ms;
+                        drop(cfg_guard);
                         send_set_activity(
                             &discord_tx,
                             &active,
                             effective_elapsed,
-                            TRACK_DEBOUNCE_MS,
+                            debounce_ms,
                             display,
                         )
                         .await;
+
+                        // Write nowplaying snapshot for prefs app polling.
+                        {
+                            let snapshot = serde_json::json!({
+                                "title": active.track.title,
+                                "artist": active.track.artist,
+                                "album": active.track.album,
+                                "artwork_url": active.artwork_url,
+                            });
+                            if let Ok(dir) = config::data_dir() {
+                                tokio::task::spawn_blocking(move || {
+                                    if let Ok(json) = serde_json::to_string(&snapshot) {
+                                        let path = dir.join(NOWPLAYING_SNAPSHOT_FILE);
+                                        if let Err(e) = std::fs::write(&path, json) {
+                                            tracing::warn!(
+                                                "failed to write nowplaying snapshot: {e}"
+                                            );
+                                        }
+                                    }
+                                });
+                            }
+                        }
                     }
 
                     MediaEvent::PlaybackPaused => {
@@ -451,6 +486,11 @@ pub async fn run_pipeline(
                             }
                         }
                     }
+                    Some(AppCommand::ReloadConfig { debounce_ms }) => {
+                        tracing::info!("config reloaded: debounce_ms={debounce_ms}");
+                        cfg.write().await.playback.debounce_ms = debounce_ms;
+                        debouncer.set_duration(std::time::Duration::from_millis(debounce_ms));
+                    }
                     None => break, // sender dropped — treat as quit
                 }
             }
@@ -460,11 +500,16 @@ pub async fn run_pipeline(
 
 #[cfg(test)]
 mod tests {
-    use super::{project_elapsed, ActiveTrack};
+    use super::{project_elapsed, ActiveTrack, AppCommand};
     use crate::constants::TRAY_PERMISSION_DENIED_DETAIL;
     use crate::discord::activity::TrackInfo;
     use crate::tray::icons::TrayIconVariant;
     use crate::tray::{DiscordHealth, HelperHealth, TrayStatus};
+
+    #[test]
+    fn app_command_reload_config_variant_exists() {
+        let _cmd: AppCommand = AppCommand::ReloadConfig { debounce_ms: 500 };
+    }
 
     #[test]
     fn status_shows_discord_error_after_disconnect() {
