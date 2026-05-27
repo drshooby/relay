@@ -6,23 +6,70 @@ private struct NowPlayingSnapshot: Codable {
     var album: String?
     var artworkUrl: String?
     var playing: Bool?
+    var elapsedSecs: Double?
+    var durationSecs: Double?
+    var observedAtUnixMs: Double?
 
     enum CodingKeys: String, CodingKey {
         case title, artist, album
         case artworkUrl = "artwork_url"
         case playing
+        case elapsedSecs = "elapsed_secs"
+        case durationSecs = "duration_secs"
+        case observedAtUnixMs = "observed_at_unix_ms"
+    }
+}
+
+/// Format seconds into m:ss (under 1 hour) or h:mm:ss (1 hour+).
+private func formatTime(_ seconds: Double) -> String {
+    guard seconds.isFinite && seconds >= 0 else { return "0:00" }
+    let total = Int(seconds)
+    let h = total / 3600
+    let m = (total % 3600) / 60
+    let s = total % 60
+    if h > 0 {
+        return String(format: "%d:%02d:%02d", h, m, s)
+    } else {
+        return String(format: "%d:%02d", m, s)
     }
 }
 
 struct NowPlayingView: View {
     @State private var snapshot: NowPlayingSnapshot?
     @State private var pollTimer: Timer?
+    /// High-frequency "now" for smooth ticking. Updated every 0.25 s.
+    @State private var now: Date = Date()
 
     private var snapshotURL: URL? {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
             .first?
             .appendingPathComponent("relay/nowplaying.json")
     }
+
+    // MARK: - Computed playback position
+
+    private var currentElapsed: Double? {
+        guard let snap = snapshot,
+              let elapsed = snap.elapsedSecs else { return nil }
+        guard snap.playing == true,
+              let observedAtMs = snap.observedAtUnixMs else { return elapsed }
+        let observedAt = Date(timeIntervalSince1970: observedAtMs / 1000.0)
+        let delta = now.timeIntervalSince(observedAt)
+        let projected = elapsed + max(0, delta)
+        if let dur = snap.durationSecs {
+            return min(projected, dur)
+        }
+        return projected
+    }
+
+    private var progress: Double {
+        guard let elapsed = currentElapsed,
+              let duration = snapshot?.durationSecs,
+              duration > 0 else { return 0 }
+        return min(elapsed / duration, 1.0)
+    }
+
+    // MARK: - Body
 
     var body: some View {
         VStack {
@@ -55,19 +102,6 @@ struct NowPlayingView: View {
                             .clipShape(RoundedRectangle(cornerRadius: 12))
                     }
 
-                    // Playing/Paused badge
-                    let isPlaying = snap.playing ?? true
-                    Text(isPlaying ? "Playing" : "Paused")
-                        .font(.caption)
-                        .fontWeight(.semibold)
-                        .foregroundStyle(isPlaying ? Color.green : Color.secondary)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 4)
-                        .background(
-                            (isPlaying ? Color.green : Color.secondary).opacity(0.15)
-                        )
-                        .clipShape(Capsule())
-
                     // Track info
                     VStack(spacing: 6) {
                         Text(snap.title ?? "Unknown Title")
@@ -90,6 +124,37 @@ struct NowPlayingView: View {
                                 .lineLimit(1)
                         }
                     }
+
+                    // Progress bar — only when duration is known
+                    if let duration = snap.durationSecs, duration > 0,
+                       let elapsed = currentElapsed {
+                        let isPlaying = snap.playing ?? true
+                        VStack(spacing: 4) {
+                            ProgressView(value: progress)
+                                .progressViewStyle(.linear)
+                                .tint(.accentColor)
+                                .animation(.linear(duration: 0.25), value: progress)
+
+                            HStack {
+                                HStack(spacing: 4) {
+                                    if !isPlaying {
+                                        Image(systemName: "pause.fill")
+                                            .font(.caption2)
+                                            .foregroundStyle(.tertiary)
+                                    }
+                                    Text(formatTime(elapsed))
+                                        .font(.caption.monospacedDigit())
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Text(formatTime(duration))
+                                    .font(.caption.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 12)
+                    }
                 }
                 .padding(.horizontal, 24)
             } else {
@@ -108,6 +173,7 @@ struct NowPlayingView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear {
             loadSnapshot()
+            // 1 s poll to pick up new snapshot data from the pipeline.
             pollTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
                 loadSnapshot()
             }
@@ -115,6 +181,12 @@ struct NowPlayingView: View {
         .onDisappear {
             pollTimer?.invalidate()
             pollTimer = nil
+        }
+        // 0.25 s tick to smoothly advance the progress bar locally.
+        .onReceive(
+            Timer.publish(every: 0.25, on: .main, in: .common).autoconnect()
+        ) { tick in
+            now = tick
         }
     }
 

@@ -6,9 +6,7 @@ use winit::event_loop::EventLoopProxy;
 use crate::artwork::cache::ArtworkCache;
 use crate::artwork::itunes::{search_track, TrackLookup};
 use crate::config::{self, Config, DisplayConfig};
-use crate::constants::{
-    CHANNEL_BUFFER_SIZE, NOWPLAYING_SNAPSHOT_FILE, TRAY_PERMISSION_DENIED_DETAIL,
-};
+use crate::constants::{CHANNEL_BUFFER_SIZE, TRAY_PERMISSION_DENIED_DETAIL};
 use crate::discord::activity::{compute_started_at, TrackInfo};
 use crate::discord::client::{run_discord_client, DiscordCommand, DiscordStatus};
 use crate::errors;
@@ -121,6 +119,62 @@ fn now_unix_secs() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
+}
+
+fn now_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+/// Write the `nowplaying.json` snapshot consumed by RelayPreferences.
+///
+/// - `active = Some(t)` — track is known; writes full payload.
+/// - `active = None`    — no track; deletes the file so the prefs app sees
+///   the empty state without stale data.
+/// - `playing`          — caller sets this; allows writing `playing: false`
+///   on pause even though the `ActiveTrack` struct predates the flag flip.
+pub(crate) fn write_nowplaying_snapshot(
+    active: Option<&ActiveTrack>,
+    playing: bool,
+    dir: &std::path::Path,
+) -> Result<(), std::io::Error> {
+    let path = dir.join(crate::constants::NOWPLAYING_SNAPSHOT_FILE);
+
+    match active {
+        None => {
+            // Remove the file so the prefs app falls to the empty state.
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Some(a) => {
+            let observed_at = now_unix_ms();
+            let mut obj = serde_json::json!({
+                "title": a.track.title,
+                "artist": a.track.artist,
+                "album": a.track.album,
+                "artwork_url": a.artwork_url,
+                "playing": playing,
+                "observed_at_unix_ms": observed_at,
+            });
+            // elapsed_secs: omit when unknown
+            if let Some(e) = a.last_elapsed_secs {
+                obj["elapsed_secs"] = serde_json::json!(e);
+            }
+            // duration_secs: omit when unknown
+            if let Some(d) = a.duration_secs {
+                obj["duration_secs"] = serde_json::json!(d);
+            }
+            let json = serde_json::to_string(&obj).map_err(std::io::Error::other)?;
+            std::fs::create_dir_all(dir)?;
+            std::fs::write(&path, json)?;
+        }
+    }
+    Ok(())
 }
 
 async fn send_set_activity(
@@ -277,6 +331,22 @@ pub async fn run_pipeline(
                                     )
                                     .await;
                                 }
+                                // Update snapshot so prefs bar reflects scrub position.
+                                let snap_active = active.clone();
+                                let snap_playing = !active.paused;
+                                if let Ok(dir) = config::data_dir() {
+                                    tokio::task::spawn_blocking(move || {
+                                        if let Err(e) = write_nowplaying_snapshot(
+                                            Some(&snap_active),
+                                            snap_playing,
+                                            &dir,
+                                        ) {
+                                            tracing::warn!(
+                                                "failed to write nowplaying snapshot on position change: {e}"
+                                            );
+                                        }
+                                    });
+                                }
                             }
                         }
                     }
@@ -411,22 +481,17 @@ pub async fn run_pipeline(
 
                         // Write nowplaying snapshot for prefs app polling.
                         {
-                            let snapshot = serde_json::json!({
-                                "title": active.track.title,
-                                "artist": active.track.artist,
-                                "album": active.track.album,
-                                "artwork_url": active.artwork_url,
-                                "playing": !active.paused,
-                            });
+                            let snap_active = active.clone();
                             if let Ok(dir) = config::data_dir() {
                                 tokio::task::spawn_blocking(move || {
-                                    if let Ok(json) = serde_json::to_string(&snapshot) {
-                                        let path = dir.join(NOWPLAYING_SNAPSHOT_FILE);
-                                        if let Err(e) = std::fs::write(&path, json) {
-                                            tracing::warn!(
-                                                "failed to write nowplaying snapshot: {e}"
-                                            );
-                                        }
+                                    if let Err(e) = write_nowplaying_snapshot(
+                                        Some(&snap_active),
+                                        true,
+                                        &dir,
+                                    ) {
+                                        tracing::warn!(
+                                            "failed to write nowplaying snapshot: {e}"
+                                        );
                                     }
                                 });
                             }
@@ -441,6 +506,21 @@ pub async fn run_pipeline(
                                 artist: active.track.artist.clone(),
                             };
                             send_status(status.clone());
+                            // Write snapshot with playing=false so prefs bar freezes.
+                            let snap_active = active.clone();
+                            if let Ok(dir) = config::data_dir() {
+                                tokio::task::spawn_blocking(move || {
+                                    if let Err(e) = write_nowplaying_snapshot(
+                                        Some(&snap_active),
+                                        false,
+                                        &dir,
+                                    ) {
+                                        tracing::warn!(
+                                            "failed to write nowplaying snapshot on pause: {e}"
+                                        );
+                                    }
+                                });
+                            }
                         } else {
                             status.playback = PlaybackStatus::Idle;
                             send_status(status.clone());
@@ -455,6 +535,16 @@ pub async fn run_pipeline(
                         status.playback = PlaybackStatus::Idle;
                         send_status(status.clone());
                         let _ = discord_tx.send(DiscordCommand::ClearActivity).await;
+                        // Delete the snapshot so prefs app shows empty state.
+                        if let Ok(dir) = config::data_dir() {
+                            tokio::task::spawn_blocking(move || {
+                                if let Err(e) = write_nowplaying_snapshot(None, false, &dir) {
+                                    tracing::warn!(
+                                        "failed to clear nowplaying snapshot on stop: {e}"
+                                    );
+                                }
+                            });
+                        }
                     }
 
                     MediaEvent::PositionChanged { .. } => {
@@ -533,11 +623,104 @@ pub async fn run_pipeline(
 
 #[cfg(test)]
 mod tests {
-    use super::{compute_effective_elapsed, project_elapsed, ActiveTrack, AppCommand};
+    use super::{
+        compute_effective_elapsed, project_elapsed, write_nowplaying_snapshot, ActiveTrack,
+        AppCommand,
+    };
     use crate::constants::TRAY_PERMISSION_DENIED_DETAIL;
     use crate::discord::activity::TrackInfo;
     use crate::tray::icons::TrayIconVariant;
     use crate::tray::{DiscordHealth, HelperHealth, TrayStatus};
+
+    fn make_active_with_duration(
+        title: &str,
+        artist: &str,
+        elapsed: Option<u64>,
+        duration: Option<u64>,
+    ) -> ActiveTrack {
+        ActiveTrack {
+            track: TrackInfo {
+                title: title.to_string(),
+                artist: artist.to_string(),
+                album: "Test Album".to_string(),
+            },
+            artwork_url: None,
+            track_url: None,
+            duration_secs: duration,
+            last_elapsed_secs: elapsed,
+            last_elapsed_observed_at: None,
+            paused: false,
+        }
+    }
+
+    // ---- write_nowplaying_snapshot tests ----
+
+    #[test]
+    fn snapshot_written_on_position_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let active = make_active_with_duration("Song", "Artist", Some(93), Some(215));
+        write_nowplaying_snapshot(Some(&active), true, dir.path()).unwrap();
+
+        let path = dir.path().join(crate::constants::NOWPLAYING_SNAPSHOT_FILE);
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&contents).unwrap();
+        assert_eq!(v["elapsed_secs"], 93);
+        assert_eq!(v["duration_secs"], 215);
+        assert_eq!(v["playing"], true);
+    }
+
+    #[test]
+    fn snapshot_written_on_pause_with_playing_false() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut active = make_active_with_duration("Song", "Artist", Some(60), Some(200));
+        active.paused = true;
+        write_nowplaying_snapshot(Some(&active), false, dir.path()).unwrap();
+
+        let path = dir.path().join(crate::constants::NOWPLAYING_SNAPSHOT_FILE);
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&contents).unwrap();
+        assert_eq!(v["playing"], false);
+        assert_eq!(v["elapsed_secs"], 60);
+    }
+
+    #[test]
+    fn snapshot_includes_observed_at_in_ms() {
+        let dir = tempfile::tempdir().unwrap();
+        let active = make_active_with_duration("Song", "Artist", Some(10), Some(300));
+        let before_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        write_nowplaying_snapshot(Some(&active), true, dir.path()).unwrap();
+        let after_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
+        let path = dir.path().join(crate::constants::NOWPLAYING_SNAPSHOT_FILE);
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&contents).unwrap();
+        let observed_at = v["observed_at_unix_ms"].as_u64().unwrap();
+        assert!(
+            observed_at >= before_ms && observed_at <= after_ms,
+            "observed_at_unix_ms={observed_at} not in range [{before_ms}, {after_ms}]"
+        );
+    }
+
+    #[test]
+    fn snapshot_omits_duration_when_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        let active = make_active_with_duration("Song", "Artist", Some(30), None);
+        write_nowplaying_snapshot(Some(&active), true, dir.path()).unwrap();
+
+        let path = dir.path().join(crate::constants::NOWPLAYING_SNAPSHOT_FILE);
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&contents).unwrap();
+        assert!(
+            v.get("duration_secs").is_none() || v["duration_secs"].is_null(),
+            "duration_secs should be absent when unknown"
+        );
+    }
 
     // ---- compute_effective_elapsed tests (RED first — function does not exist yet) ----
 
