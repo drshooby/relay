@@ -28,7 +28,7 @@ struct ErrorsView: View {
                     Text("No errors recorded.")
                         .font(.headline)
                         .foregroundStyle(.secondary)
-                    Text("The tray icon turns red when something needs attention.")
+                    Text("The tray icon dims when something needs attention.")
                         .font(.subheadline)
                         .foregroundStyle(.tertiary)
                         .multilineTextAlignment(.center)
