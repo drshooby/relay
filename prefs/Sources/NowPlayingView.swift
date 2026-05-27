@@ -5,10 +5,12 @@ private struct NowPlayingSnapshot: Codable {
     var artist: String?
     var album: String?
     var artworkUrl: String?
+    var playing: Bool?
 
     enum CodingKeys: String, CodingKey {
         case title, artist, album
         case artworkUrl = "artwork_url"
+        case playing
     }
 }
 
@@ -73,6 +75,22 @@ struct NowPlayingView: View {
                                 .lineLimit(1)
                         }
                     }
+
+                    let isPlaying = snap.playing ?? true
+                    HStack(spacing: 5) {
+                        Image(systemName: isPlaying ? "play.fill" : "pause.fill")
+                            .font(.caption2)
+                        Text(isPlaying ? "Playing" : "Paused")
+                            .font(.caption)
+                            .fontWeight(.medium)
+                    }
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 4)
+                    .background(
+                        Capsule()
+                            .fill(Color.secondary.opacity(0.12))
+                    )
                 }
                 .padding(.horizontal, 24)
             } else {
