@@ -294,17 +294,18 @@ func emitCurrentState(observer: NowPlayingObserver, reason: String, isRetry: Boo
             guard !dur.isEmpty, let secs = Double(dur), secs > 0 else { return nil }
             return String(Int(secs.rounded()))
         }()
-        // On the resume path, Music.app can lag updating player position.
-        // If elapsed is missing and this is our first attempt, retry once after
-        // 200 ms. If still missing on the retry, skip emitting track_changed so
-        // the Rust pipeline keeps its cached+projected position instead.
-        if elapsed == nil {
+        // On the resume path, Music.app can lag updating player position,
+        // briefly reporting 0 before the real position is available.
+        // Treat elapsed==nil OR (resume + elapsed=="0") as unreliable: retry
+        // once after 200 ms. If still unreliable, skip track_changed entirely
+        // so the Rust pipeline keeps its cached+projected position instead.
+        let elapsedUnreliable = elapsed == nil || (reason.contains("resume") && elapsed == "0")
+        if elapsedUnreliable {
             if isRetry {
-                // Second attempt also missed position — skip track_changed.
-                log("\(reason): elapsed still missing after retry, skipping track_changed")
+                log("\(reason): elapsed still unreliable after retry, skipping track_changed")
                 return
             } else {
-                log("\(reason): elapsed missing, retrying in 200ms")
+                log("\(reason): elapsed unreliable (\(elapsed ?? "nil")), retrying in 200ms")
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
                     emitCurrentState(observer: observer, reason: reason, isRetry: true)
                 }

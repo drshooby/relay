@@ -42,7 +42,7 @@ pub enum AppCommand {
 
 /// Cached Discord activity fields reused for position-only updates.
 #[derive(Debug, Clone)]
-struct ActiveTrack {
+pub(crate) struct ActiveTrack {
     track: TrackInfo,
     artwork_url: Option<String>,
     track_url: Option<String>,
@@ -80,6 +80,39 @@ pub fn project_elapsed(
         Some(d) if projected > d => d,
         _ => projected,
     })
+}
+
+/// Determine the effective elapsed position for a `TrackChanged` event.
+///
+/// - When the incoming event reports a real (non-zero) position for the same track,
+///   use it as-is.
+/// - When the same track is detected AND `event_elapsed` is `None` or `Some(0)`,
+///   treat this as a resume where Music.app hasn't updated `player position` yet.
+///   Fall back to the cached `last_elapsed_secs` from `active_track`.
+/// - For a genuinely different track, always use `event_elapsed` (even if it is 0).
+pub(crate) fn compute_effective_elapsed(
+    event_elapsed: Option<u64>,
+    event_title: &str,
+    event_artist: &str,
+    active_track: Option<&ActiveTrack>,
+) -> Option<u64> {
+    let is_same_track = active_track
+        .is_some_and(|a| a.track.title == event_title && a.track.artist == event_artist);
+
+    // On resume the helper may emit elapsed=None or elapsed=Some(0) before
+    // Music.app has updated its player position. Use the cached value when both
+    // conditions hold: same track AND the reported position is zero/absent.
+    let is_resume = is_same_track && event_elapsed.unwrap_or(0) == 0;
+
+    if is_resume {
+        // Use cached position directly — pause duration is unknown so we do NOT
+        // project forward here. The new ActiveTrack sets last_elapsed_observed_at
+        // = Instant::now(), so subsequent display-toggle republishes project
+        // correctly from the resume moment.
+        active_track.and_then(|prev| prev.last_elapsed_secs)
+    } else {
+        event_elapsed
+    }
 }
 
 fn now_unix_secs() -> i64 {
@@ -236,15 +269,21 @@ pub async fn run_pipeline(
                             }
                         }
                     }
-                    MediaEvent::TrackChanged { .. } => {
+                    MediaEvent::TrackChanged { ref title, ref artist, .. } => {
                         // Clear permission-denied state on recovery.
                         if matches!(status.helper, HelperHealth::PermissionDenied) {
                             status.helper = HelperHealth::Running;
                             status.last_error = None;
                         }
-                        // Drop stale metadata until debounce completes so position_changed
-                        // cannot advance the progress bar for the previous track.
-                        active_track = None;
+                        // Only null the cached track when the title+artist differ.
+                        // Preserving it across pause→resume lets the debounced arm
+                        // detect the resume and use the cached elapsed position.
+                        let same_track = active_track.as_ref().is_some_and(|a| {
+                            a.track.title == *title && a.track.artist == *artist
+                        });
+                        if !same_track {
+                            active_track = None;
+                        }
                         debouncer.submit(event, debounced_tx.clone());
                     }
                     MediaEvent::PlaybackPaused => {
@@ -286,33 +325,15 @@ pub async fn run_pipeline(
                             album,
                         };
 
-                        // Resume path: same title+artist, but helper reported no elapsed.
-                        // Project the cached position forward so Discord shows the right time.
-                        let is_resume = elapsed_secs.is_none()
-                            && active_track.as_ref().is_some_and(|a| {
-                                a.track.title == title && a.track.artist == artist
-                            });
-
-                        let effective_elapsed = if is_resume {
-                            if let Some(ref prev) = active_track {
-                                let observed_ago = prev
-                                    .last_elapsed_observed_at
-                                    .map(|t| {
-                                        t.elapsed().as_secs()
-                                    })
-                                    .unwrap_or(0);
-                                project_elapsed(
-                                    None,
-                                    prev.last_elapsed_secs,
-                                    observed_ago,
-                                    duration_secs.or(prev.duration_secs),
-                                )
-                            } else {
-                                None
-                            }
-                        } else {
-                            elapsed_secs
-                        };
+                        // Resume path: same title+artist with elapsed=None or elapsed=Some(0).
+                        // compute_effective_elapsed falls back to the cached position so
+                        // Discord shows the right time instead of resetting to 0:00.
+                        let effective_elapsed = compute_effective_elapsed(
+                            elapsed_secs,
+                            &title,
+                            &artist,
+                            active_track.as_ref(),
+                        );
 
                         status.playback = PlaybackStatus::Playing {
                             title: title.clone(),
@@ -500,11 +521,101 @@ pub async fn run_pipeline(
 
 #[cfg(test)]
 mod tests {
-    use super::{project_elapsed, ActiveTrack, AppCommand};
+    use super::{compute_effective_elapsed, project_elapsed, ActiveTrack, AppCommand};
     use crate::constants::TRAY_PERMISSION_DENIED_DETAIL;
     use crate::discord::activity::TrackInfo;
     use crate::tray::icons::TrayIconVariant;
     use crate::tray::{DiscordHealth, HelperHealth, TrayStatus};
+
+    // ---- compute_effective_elapsed tests (RED first — function does not exist yet) ----
+
+    fn make_active(title: &str, artist: &str, last_elapsed_secs: Option<u64>) -> ActiveTrack {
+        ActiveTrack {
+            track: TrackInfo {
+                title: title.to_string(),
+                artist: artist.to_string(),
+                album: "Album".to_string(),
+            },
+            artwork_url: None,
+            track_url: None,
+            duration_secs: None,
+            last_elapsed_secs,
+            last_elapsed_observed_at: None,
+            paused: false,
+        }
+    }
+
+    /// No active track — should fall through to the event value.
+    #[test]
+    fn effective_elapsed_no_active_track_returns_event_value() {
+        let result = compute_effective_elapsed(Some(42), "Song", "Artist", None);
+        assert_eq!(result, Some(42));
+    }
+
+    /// Different title — a genuinely new track starting at 0. Should use event value.
+    #[test]
+    fn effective_elapsed_legit_new_track_from_zero() {
+        let active = make_active("Old Song", "Artist", Some(90));
+        let result = compute_effective_elapsed(Some(0), "New Song", "Artist", Some(&active));
+        assert_eq!(result, Some(0));
+    }
+
+    /// Same track, elapsed=None → resume with missing elapsed. Should use cache.
+    #[test]
+    fn effective_elapsed_resume_with_none_uses_cache() {
+        let active = make_active("Song", "Artist", Some(90));
+        let result = compute_effective_elapsed(None, "Song", "Artist", Some(&active));
+        assert_eq!(result, Some(90));
+    }
+
+    /// Same track, elapsed=Some(0) → Music.app stale zero on resume. Should use cache.
+    /// This is THE BUG: previously returned Some(0) instead of Some(90).
+    #[test]
+    fn effective_elapsed_resume_with_zero_uses_cache() {
+        let active = make_active("Song", "Artist", Some(90));
+        let result = compute_effective_elapsed(Some(0), "Song", "Artist", Some(&active));
+        assert_eq!(result, Some(90));
+    }
+
+    /// Same track, real non-zero elapsed position reported — use it directly.
+    #[test]
+    fn effective_elapsed_legit_position_reported() {
+        let active = make_active("Song", "Artist", Some(90));
+        let result = compute_effective_elapsed(Some(45), "Song", "Artist", Some(&active));
+        assert_eq!(result, Some(45));
+    }
+
+    /// Same track, elapsed=None, no cache. Nothing to fall back to → None.
+    #[test]
+    fn effective_elapsed_no_cache_falls_back_to_event() {
+        let active = make_active("Song", "Artist", None);
+        let result = compute_effective_elapsed(None, "Song", "Artist", Some(&active));
+        assert_eq!(result, None);
+    }
+
+    // ---- raw-arm same-track decision tests ----
+
+    /// same title+artist — raw TrackChanged arm should NOT null active_track.
+    #[test]
+    fn same_track_keeps_active_track() {
+        let active = make_active("Song", "Artist", Some(90));
+        let same_track = active.track.title == "Song" && active.track.artist == "Artist";
+        assert!(
+            same_track,
+            "same title+artist must be detected as the same track"
+        );
+    }
+
+    /// different title — raw TrackChanged arm should null active_track.
+    #[test]
+    fn different_track_nulls_active_track() {
+        let active = make_active("Song", "Artist", Some(90));
+        let same_track = active.track.title == "Other Song" && active.track.artist == "Artist";
+        assert!(
+            !same_track,
+            "different title must be detected as a different track"
+        );
+    }
 
     #[test]
     fn app_command_reload_config_variant_exists() {
