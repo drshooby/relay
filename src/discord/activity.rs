@@ -36,15 +36,13 @@ pub fn compute_ended_at(started_at: i64, duration_secs: Option<u64>) -> Option<i
         .map(|d| started_at.saturating_add(d as i64))
 }
 
-/// Build a Discord activity payload for a playing or paused track.
+/// Build a Discord activity payload for a playing track.
 ///
 /// - `track`: track metadata (title, artist, album).
 /// - `artwork_url`: optional URL for large image (600x600). When `None`, uses
 ///   `DISCORD_ASSET_RELAY_BADGE` as the large image and omits the small overlay.
 /// - `track_url`: optional Apple Music link for the listen button.
-/// - `started_at` / `duration_secs`: used for the progress bar when `paused` is `false`.
-/// - `paused`: when `true`, timestamps are omitted entirely — Discord shows a
-///   static card with no ticking counter or progress bar.
+/// - `started_at` / `duration_secs`: used for the progress bar.
 /// - `display`: per-field visibility toggles. Defaults (all `true`) reproduce the
 ///   pre-#32 behaviour.
 pub fn build_activity(
@@ -53,7 +51,6 @@ pub fn build_activity(
     track_url: Option<&str>,
     started_at: i64,
     duration_secs: Option<u64>,
-    paused: bool,
     display: &DisplayConfig,
 ) -> Activity<'static> {
     // Apply display filters.
@@ -96,13 +93,11 @@ pub fn build_activity(
         activity = activity.state(track.artist.clone());
     }
 
-    if !paused {
-        let mut timestamps = Timestamps::new().start(started_at);
-        if let Some(end) = compute_ended_at(started_at, duration_secs) {
-            timestamps = timestamps.end(end);
-        }
-        activity = activity.timestamps(timestamps);
+    let mut timestamps = Timestamps::new().start(started_at);
+    if let Some(end) = compute_ended_at(started_at, duration_secs) {
+        timestamps = timestamps.end(end);
     }
+    activity = activity.timestamps(timestamps);
 
     if let Some(url) = track_url.filter(|u| !u.is_empty()) {
         activity = activity.buttons(vec![Button::new(
@@ -136,7 +131,6 @@ mod tests {
             None,
             1_000_000,
             Some(300),
-            false,
             &DisplayConfig::default(),
         );
     }
@@ -150,7 +144,6 @@ mod tests {
             None,
             1_000_000,
             None,
-            false,
             &DisplayConfig::default(),
         );
     }
@@ -164,7 +157,6 @@ mod tests {
             None,
             1_000_000,
             None,
-            false,
             &DisplayConfig::default(),
         );
         let json = serde_json::to_value(&activity).expect("activity should serialise");
@@ -184,7 +176,6 @@ mod tests {
             None,
             1_000_000,
             None,
-            false,
             &DisplayConfig::default(),
         );
         let json = serde_json::to_value(&activity).expect("activity should serialise");
@@ -203,7 +194,6 @@ mod tests {
             None,
             1_000_000,
             None,
-            false,
             &DisplayConfig::default(),
         );
         let json = serde_json::to_value(&activity).expect("activity should serialise");
@@ -219,7 +209,6 @@ mod tests {
             None,
             1_000,
             Some(157),
-            false,
             &DisplayConfig::default(),
         );
         let json = serde_json::to_value(&activity).expect("activity should serialise");
@@ -236,15 +225,7 @@ mod tests {
     #[test]
     fn build_activity_omits_end_without_duration() {
         let track = sample_track();
-        let activity = build_activity(
-            &track,
-            None,
-            None,
-            1_000,
-            None,
-            false,
-            &DisplayConfig::default(),
-        );
+        let activity = build_activity(&track, None, None, 1_000, None, &DisplayConfig::default());
         let json = serde_json::to_value(&activity).expect("activity should serialise");
         let timestamps = json
             .get("timestamps")
@@ -265,7 +246,6 @@ mod tests {
             None,
             1_000_000,
             None,
-            false,
             &DisplayConfig::default(),
         );
         let json = serde_json::to_value(&activity).expect("activity should serialise");
@@ -289,7 +269,6 @@ mod tests {
             None,
             1_000_000,
             None,
-            false,
             &DisplayConfig::default(),
         );
         let json = serde_json::to_value(&activity).expect("activity should serialise");
@@ -313,7 +292,6 @@ mod tests {
             Some("https://music.apple.com/us/album/example"),
             1_000_000,
             None,
-            false,
             &DisplayConfig::default(),
         );
         let json = serde_json::to_value(&activity).expect("activity should serialise");
@@ -334,64 +312,10 @@ mod tests {
             None,
             1_000_000,
             None,
-            false,
             &DisplayConfig::default(),
         );
         let json = serde_json::to_value(&activity).expect("activity should serialise");
         assert!(json.get("buttons").is_none());
-    }
-
-    // --- #27 paused-state tests ---
-
-    #[test]
-    fn build_activity_paused_omits_timestamps() {
-        let track = sample_track();
-        let activity = build_activity(
-            &track,
-            None,
-            None,
-            1_000_000,
-            Some(300),
-            true,
-            &DisplayConfig::default(),
-        );
-        let json = serde_json::to_value(&activity).expect("activity should serialise");
-        assert!(
-            json.get("timestamps").is_none(),
-            "paused activity must not include a timestamps field"
-        );
-    }
-
-    #[test]
-    fn build_activity_paused_preserves_title_artist_assets() {
-        let track = sample_track();
-        let activity = build_activity(
-            &track,
-            Some("https://example.com/art.jpg"),
-            None,
-            1_000_000,
-            Some(300),
-            true,
-            &DisplayConfig::default(),
-        );
-        let json = serde_json::to_value(&activity).expect("activity should serialise");
-        assert_eq!(
-            json.get("details").and_then(|v| v.as_str()),
-            Some("Bohemian Rhapsody"),
-            "details must be preserved when paused"
-        );
-        assert_eq!(
-            json.get("state").and_then(|v| v.as_str()),
-            Some("Queen"),
-            "state must be preserved when paused"
-        );
-        let assets = json
-            .get("assets")
-            .expect("assets must be present when paused");
-        assert!(
-            assets.get("large_image").is_some(),
-            "large_image must be present when paused"
-        );
     }
 
     // --- #34 artwork fallback tests ---
@@ -405,7 +329,6 @@ mod tests {
             None,
             1_000_000,
             None,
-            false,
             &DisplayConfig::default(),
         );
         let json = serde_json::to_value(&activity).expect("activity should serialise");
@@ -434,7 +357,6 @@ mod tests {
             None,
             1_000_000,
             None,
-            false,
             &DisplayConfig::default(),
         );
         let json = serde_json::to_value(&activity).expect("activity should serialise");
@@ -460,7 +382,7 @@ mod tests {
             show_title: false,
             ..DisplayConfig::default()
         };
-        let activity = build_activity(&track, None, None, 1_000_000, None, false, &display);
+        let activity = build_activity(&track, None, None, 1_000_000, None, &display);
         let json = serde_json::to_value(&activity).expect("activity should serialise");
         assert_eq!(
             json.get("details").and_then(|v| v.as_str()),
@@ -476,7 +398,7 @@ mod tests {
             show_artist: false,
             ..DisplayConfig::default()
         };
-        let activity = build_activity(&track, None, None, 1_000_000, None, false, &display);
+        let activity = build_activity(&track, None, None, 1_000_000, None, &display);
         let json = serde_json::to_value(&activity).expect("activity should serialise");
         assert!(
             json.get("state").is_none(),
@@ -497,7 +419,6 @@ mod tests {
             None,
             1_000_000,
             None,
-            false,
             &display,
         );
         let json = serde_json::to_value(&activity).expect("activity should serialise");
@@ -522,7 +443,6 @@ mod tests {
             None,
             1_000_000,
             None,
-            false,
             &display,
         );
         let json = serde_json::to_value(&activity).expect("activity should serialise");
@@ -553,7 +473,6 @@ mod tests {
             None,
             1_000_000,
             None,
-            false,
             &display,
         );
         let json = serde_json::to_value(&activity).expect("activity should serialise");
@@ -606,5 +525,53 @@ mod tests {
     fn compute_ended_at_none_for_zero_duration() {
         assert_eq!(compute_ended_at(1_000, Some(0)), None);
         assert_eq!(compute_ended_at(1_000, None), None);
+    }
+
+    // --- #37 resume-from-cache test ---
+
+    /// After ClearActivity (pause), a resume re-publishes with the correct started_at.
+    /// The pipeline caches the track and last_elapsed. On resume it computes a new
+    /// started_at from the projected elapsed. This verifies that compute_started_at
+    /// produces a started_at < now when elapsed is supplied (i.e., the clock-back
+    /// calculation works), and that a paused-then-resumed track no longer has a
+    /// `paused` parameter that would suppress timestamps.
+    #[test]
+    fn cached_activity_replay_after_clear() {
+        let now_secs: i64 = 10_000;
+        let projected_elapsed: Option<u64> = Some(90); // 90s into track at resume time
+        let debounce_ms = 0u64; // no debounce on resume
+
+        let started_at = compute_started_at(now_secs, projected_elapsed, debounce_ms);
+        // started_at should be now − 90 = 9910
+        assert_eq!(started_at, 9_910);
+
+        // Building the activity should include timestamps (no paused flag suppressing them).
+        let track = TrackInfo {
+            title: "Test Track".into(),
+            artist: "Test Artist".into(),
+            album: "Test Album".into(),
+        };
+        let activity = build_activity(
+            &track,
+            None,
+            None,
+            started_at,
+            Some(200),
+            &DisplayConfig::default(),
+        );
+        let json = serde_json::to_value(&activity).expect("activity should serialise");
+        let timestamps = json
+            .get("timestamps")
+            .expect("resumed activity must include timestamps");
+        assert_eq!(
+            timestamps.get("start").and_then(|v| v.as_i64()),
+            Some(9_910),
+            "start should reflect projected elapsed"
+        );
+        assert_eq!(
+            timestamps.get("end").and_then(|v| v.as_i64()),
+            Some(10_110), // 9910 + 200
+            "end should reflect track duration"
+        );
     }
 }

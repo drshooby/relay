@@ -234,7 +234,12 @@ class NowPlayingObserver: NSObject {
 // AppleScript triggers a one-time Apple Events permission prompt the first time it runs.
 // Fields are joined with U+001F (unit separator) to survive titles containing pipes/tabs.
 // Called both at startup and in response to {"command":"refresh"} from Rust.
-func emitCurrentState(observer: NowPlayingObserver, reason: String) {
+//
+// On the resume path, Music.app sometimes hasn't updated player position yet when
+// the AppleScript runs. If elapsed is missing, we retry once after 200 ms. If the
+// second attempt also yields no position, we skip emitting track_changed entirely so
+// the Rust pipeline can use its cached+projected position instead.
+func emitCurrentState(observer: NowPlayingObserver, reason: String, isRetry: Bool = false) {
     let source = """
     tell application "Music"
         if it is not running then return "stopped"
@@ -289,6 +294,23 @@ func emitCurrentState(observer: NowPlayingObserver, reason: String) {
             guard !dur.isEmpty, let secs = Double(dur), secs > 0 else { return nil }
             return String(Int(secs.rounded()))
         }()
+        // On the resume path, Music.app can lag updating player position.
+        // If elapsed is missing and this is our first attempt, retry once after
+        // 200 ms. If still missing on the retry, skip emitting track_changed so
+        // the Rust pipeline keeps its cached+projected position instead.
+        if elapsed == nil {
+            if isRetry {
+                // Second attempt also missed position — skip track_changed.
+                log("\(reason): elapsed still missing after retry, skipping track_changed")
+                return
+            } else {
+                log("\(reason): elapsed missing, retrying in 200ms")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                    emitCurrentState(observer: observer, reason: reason, isRetry: true)
+                }
+                return
+            }
+        }
         lastEmittedTitle = title
         observer.lastNowPlayingTitle = title
         emitTrackChanged(
